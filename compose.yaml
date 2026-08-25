@@ -1,0 +1,21 @@
+services:
+  yello-studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yello-studio:local
+    restart: unless-stopped
+    environment:
+      YELLO_WEB_HOST: 0.0.0.0
+      YELLO_DEVICE_HOST: 0.0.0.0
+      YELLO_DATA_DIR: /data
+      # Add private integration/source hosts only when they are intentionally used.
+      YELLO_ALLOWED_HTTP_HOSTS: ${YELLO_ALLOWED_HTTP_HOSTS:-}
+    ports:
+      - "8080:8080"
+      - "8765:8765"
+    volumes:
+      - yello-data:/data
+
+volumes:
+  yello-data:

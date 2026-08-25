@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yello Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/designer" data-route="designer">
+      <span class="brand-mark">Y</span>
+      <div>
+        <strong>Yello Studio</strong>
+        <span id="document-state">Loading screen…</span>
+      </div>
+    </a>
+    <nav class="main-nav" aria-label="Studio navigation">
+      <a href="/designer" data-route="designer">Designer</a>
+      <a href="/devices" data-route="devices">Devices</a>
+      <a href="/designs" data-route="designs">Screen designs</a>
+      <a href="/settings" data-route="settings">Settings</a>
+    </nav>
+    <div id="designer-actions" class="header-actions">
+      <div class="deployment-controls">
+        <label>Screen<select id="screen-select" aria-label="Physical screen"></select></label>
+        <label>Design<select id="design-select" aria-label="Screen design"></select></label>
+        <button id="new-design" class="icon-button" title="Create design" aria-label="Create design">＋</button>
+        <button id="assign-design" class="assign-button" title="Assign selected design to selected screen">Assign</button>
+      </div>
+      <div class="device-pill" title="Physical display connection">
+        <span id="device-dot" class="status-dot"></span>
+        <span id="device-status">Checking device</span>
+      </div>
+      <button id="undo" class="icon-button" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+      <button id="redo" class="icon-button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
+      <button id="save" class="primary-button">Save &amp; apply</button>
+    </div>
+  </header>
+
+  <main id="designer-page" class="workspace">
+    <aside class="left-panel panel">
+      <section class="panel-section screens-section">
+        <div class="section-heading">
+          <h2>Screens</h2>
+          <span id="screen-summary" class="subtle">Checking…</span>
+        </div>
+        <div id="screen-list" class="screen-list"></div>
+      </section>
+
+      <section class="panel-section palette-section">
+        <div class="section-heading">
+          <h2>Add block</h2>
+          <span id="ha-integration-status" class="integration-badge">HA checking…</span>
+        </div>
+        <div id="palette" class="palette-grid">
+          <button data-add-type="text"><span class="palette-icon">T</span><span>Text</span></button>
+          <button data-add-type="clock"><span class="palette-icon">◷</span><span>Clock</span></button>
+          <button data-add-type="external-text"><span class="palette-icon">↗</span><span>External</span></button>
+          <button data-add-type="button"><span class="palette-icon">▣</span><span>Button</span></button>
+          <button data-add-type="design-link"><span class="palette-icon">↪</span><span>Screen button</span></button>
+          <button data-add-type="image"><span class="palette-icon">▧</span><span>Image</span></button>
+          <button data-add-type="color-block"><span class="palette-icon">■</span><span>Color</span></button>
+          <button data-add-type="ha-state"><span class="palette-icon">⌁</span><span>HA sensor</span></button>
+          <button data-add-type="ha-toggle"><span class="palette-icon">⏻</span><span>HA toggle</span></button>
+          <button data-add-type="script"><span class="palette-icon">{ }</span><span>Script</span></button>
+        </div>
+      </section>
+
+      <section class="panel-section layers-section">
+        <div class="section-heading">
+          <h2>Layers</h2>
+          <span id="layer-count" class="subtle"></span>
+        </div>
+        <div id="layer-list" class="layer-list"></div>
+      </section>
+    </aside>
+
+    <section class="canvas-area">
+      <div class="canvas-toolbar">
+        <div class="screen-size"><span>ILI9341</span><strong id="canvas-dimensions">240 × 320</strong></div>
+        <div class="view-toggle" role="group" aria-label="Canvas mode">
+          <button id="edit-mode" class="active" type="button">Edit</button>
+          <button id="code-mode" type="button">Code</button>
+          <button id="live-mode" type="button">Live view</button>
+        </div>
+        <div class="zoom-control">
+          <button id="zoom-out" aria-label="Zoom out">−</button>
+          <span id="zoom-label">200%</span>
+          <button id="zoom-in" aria-label="Zoom in">+</button>
+        </div>
+      </div>
+      <div id="canvas-scroll" class="canvas-scroll">
+        <div id="device-shell" class="device-shell">
+          <div id="stage" class="stage">
+            <img id="preview" width="240" height="320" alt="Rendered device preview" draggable="false">
+            <div id="canvas-overlay" class="canvas-overlay"></div>
+            <div id="live-touch-overlay" class="live-touch-overlay hidden" aria-label="Interactive live display"></div>
+          </div>
+        </div>
+      </div>
+      <div id="code-editor-pane" class="code-editor-pane hidden">
+        <div class="code-editor-heading">
+          <div>
+            <strong>Layout JSON</strong>
+            <span id="code-editor-state">Edit the complete normalized design configuration.</span>
+          </div>
+          <div class="code-editor-actions">
+            <button id="format-json" type="button" class="secondary-button">Format</button>
+            <button id="apply-json" type="button" class="primary-button">Apply JSON</button>
+          </div>
+        </div>
+        <textarea id="layout-json" class="layout-json" aria-label="Layout JSON" spellcheck="false" autocomplete="off"></textarea>
+        <div id="code-errors" class="code-errors hidden" role="alert"></div>
+      </div>
+      <div class="canvas-footer">
+        <span id="preview-status">Authoritative server preview</span>
+        <span>Drag blocks · Arrow keys nudge · Shift for 10 px</span>
+      </div>
+    </section>
+
+    <aside class="right-panel panel">
+      <section class="panel-section document-section">
+        <div class="section-heading"><h2>Design</h2></div>
+        <div class="field-grid">
+          <label for="screen-name">Name</label>
+          <input id="screen-name" type="text" maxlength="100">
+          <label for="background">Background</label>
+          <div class="color-field"><input id="background" type="color"><span id="background-value"></span></div>
+          <label for="orientation">Orientation</label>
+          <select id="orientation">
+            <option value="portrait">Portrait · 240 × 320</option>
+            <option value="landscape">Landscape · 320 × 240</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="panel-section inspector-section">
+        <div class="section-heading">
+          <h2>Inspector</h2>
+          <button id="duplicate" class="text-button" disabled>Duplicate</button>
+        </div>
+        <div id="inspector" class="inspector-empty">
+          <div class="empty-icon">◇</div>
+          <p>Select a block on the canvas or in Layers.</p>
+        </div>
+      </section>
+
+      <section id="resource-section" class="panel-section resource-section hidden">
+        <div class="section-heading"><h2 id="resource-title">Data source</h2></div>
+        <div id="resource-editor"></div>
+      </section>
+    </aside>
+  </main>
+
+  <main id="devices-page" class="management-page hidden">
+    <div class="page-heading">
+      <div><span class="eyebrow">Fleet</span><h1>Connected devices</h1><p>Monitor streaming health, rename displays, and choose the design each screen renders.</p></div>
+      <div id="device-page-summary" class="summary-chip">Loading…</div>
+    </div>
+    <div id="device-grid" class="device-grid"></div>
+  </main>
+
+  <main id="designs-page" class="management-page hidden">
+    <div class="page-heading">
+      <div><span class="eyebrow">Library</span><h1>Screen designs</h1><p>See every saved screen at once and deploy each design to one or more devices.</p></div>
+      <button id="designs-new" class="primary-button">New design</button>
+    </div>
+    <div id="design-grid" class="design-grid"></div>
+  </main>
+
+  <main id="settings-page" class="management-page hidden">
+    <div class="page-heading">
+      <div><span class="eyebrow">Integrations</span><h1>Settings</h1><p>Connect Yello Studio to the services used by your designs.</p></div>
+    </div>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo">HA</div>
+        <div><h2>Home Assistant</h2><p>Use a long-lived access token to read entities and control supported devices.</p></div>
+        <span id="ha-settings-state" class="integration-badge">Checking…</span>
+      </div>
+      <form id="ha-settings-form" class="settings-form">
+        <label for="ha-url">Home Assistant URL</label>
+        <input id="ha-url" type="url" placeholder="http://homeassistant.local:8123" autocomplete="url">
+        <label for="ha-token">Long-lived access token</label>
+        <input id="ha-token" type="password" placeholder="Leave blank to keep the saved token" autocomplete="new-password">
+        <p class="form-help">The token is saved only on this server in a private file. It is never returned to the browser after saving.</p>
+        <div class="settings-actions">
+          <button id="ha-save" type="submit" class="primary-button">Test &amp; save</button>
+          <button id="ha-clear" type="button" class="danger-button">Disconnect</button>
+          <span id="ha-settings-result" class="subtle"></span>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <div id="canvas-menu" class="canvas-menu hidden" role="menu">
+    <button type="button" data-context-action="align-left">Align left</button>
+    <button type="button" data-context-action="align-center">Center horizontally</button>
+    <button type="button" data-context-action="align-right">Align right</button>
+    <span></span>
+    <button type="button" data-context-action="align-top">Align top</button>
+    <button type="button" data-context-action="align-middle">Center vertically</button>
+    <button type="button" data-context-action="align-bottom">Align bottom</button>
+    <span></span>
+    <button type="button" class="danger" data-context-action="delete">Delete block</button>
+  </div>
+  <div id="app-modal-backdrop" class="app-modal-backdrop hidden">
+    <section id="app-modal" class="app-modal" role="dialog" aria-modal="true" aria-labelledby="app-modal-title" aria-describedby="app-modal-message">
+      <div class="app-modal-mark" aria-hidden="true">Y</div>
+      <div class="app-modal-copy">
+        <h2 id="app-modal-title"></h2>
+        <p id="app-modal-message"></p>
+      </div>
+      <form id="app-modal-form">
+        <label id="app-modal-input-label" class="hidden" for="app-modal-input"></label>
+        <input id="app-modal-input" class="hidden" type="text" autocomplete="off">
+        <div class="app-modal-actions">
+          <button id="app-modal-cancel" type="button" class="secondary-button">Cancel</button>
+          <button id="app-modal-confirm" type="submit" class="primary-button">Confirm</button>
+        </div>
+      </form>
+    </section>
+  </div>
+  <datalist id="ha-entity-options"></datalist>
+  <script src="/static/app.js"></script>
+</body>
+</html>

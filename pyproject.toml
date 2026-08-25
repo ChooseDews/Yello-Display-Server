@@ -1,0 +1,9 @@
+[project]
+name = "esp-yello-tools"
+version = "0.1.0"
+description = "Development and webcam capture tools for ESP Yello Device"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "opencv-python>=5.0.0.93",
+]

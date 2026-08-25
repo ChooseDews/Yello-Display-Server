@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+server/.env
+server/secrets.json
+server/studio.json
+server/layout.json
+
+# Captured screenshots
+snapshot_*.jpg
+*.jpg
+*.png
+
+# ESP-IDF build artifacts / secrets
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Runtime/container state
+data/

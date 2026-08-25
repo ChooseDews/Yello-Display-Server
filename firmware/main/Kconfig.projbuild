@@ -1,0 +1,50 @@
+menu "Yello Device Configuration"
+
+    menu "Wi-Fi"
+        config YELLO_WIFI_SSID
+            string "Factory/default WiFi SSID"
+            default ""
+            help
+                Used only when no settings have been saved by the on-device setup.
+                Leave empty to require touchscreen provisioning on first boot.
+
+        config YELLO_WIFI_PASSWORD
+            string "Factory/default WiFi Password"
+            default ""
+    endmenu
+
+    menu "WebSocket Server"
+        config YELLO_WS_HOST
+            string "Factory/default WebSocket server host/IP"
+            default "192.168.1.100"
+
+        config YELLO_WS_PORT
+            int "Factory/default WebSocket server port"
+            default 8765
+
+        config YELLO_WS_PATH
+            string "WebSocket path"
+            default "/ws"
+
+        config YELLO_WS_USE_TLS
+            bool "Use wss:// (TLS)"
+            default n
+    endmenu
+
+    menu "Display"
+        config YELLO_TFT_BACKLIGHT_GPIO
+            int "Backlight GPIO"
+            default 21
+
+        config YELLO_TFT_BACKLIGHT_ACTIVE_HIGH
+            bool "Backlight active-high"
+            default y
+    endmenu
+
+    menu "Touch"
+        config YELLO_TOUCH_IRQ_GPIO
+            int "XPT2046 IRQ (PENIRQ) GPIO"
+            default 36
+    endmenu
+
+endmenu
