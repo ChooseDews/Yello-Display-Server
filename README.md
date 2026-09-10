@@ -1,37 +1,50 @@
 # ESP Yello Device
 
-Remote-rendered interfaces for an ESP32-2432S028R-compatible 2.8-inch touch
-display. The ESP32 receives RGB565 regions over WebSocket and reports touch
-events; the server owns layout, rendering, dynamic data, actions, and
-the browser-based screen designer. The server is implemented in Rust
-(`server-rs/`, tokio + hyper + image crate); the original Python reference
-implementation was retired — its benchmark comparison against the Rust server
-is preserved in [docs/server_benchmark.md](docs/server_benchmark.md), and
-module details are in [rust_build.md](rust_build.md).
+[![Build and package](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/build.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/build.yml)
 
-## Run the designer
+Turn a "Cheap Yellow Display" (ESP32-2432S028R, 2.8" ILI9341 touch screen) into
+a network-rendered touch dashboard. A Rust server owns layout, rendering, and
+dynamic data; the ESP32 is a dumb terminal that blits RGB565 regions received
+over WebSocket and reports touch events back.
 
-```sh
-cargo run --release --manifest-path server-rs/Cargo.toml
-```
+Design screens in the browser with **Yello Studio** — drag in text, clocks,
+buttons, images, Home Assistant sensors/toggles, and sandboxed scripts, then
+hit **Save & apply** to push them to every connected screen.
 
-Open <http://127.0.0.1:8080/>. The device gateway listens on port `8765` on
-all interfaces so the ESP32 can connect over the LAN. The editor itself binds
-to localhost by default. Designs are persisted in `studio.json`, credentials
-in `secrets.json` (both created next to the working directory; override with
-`YELLO_STUDIO_PATH` / `YELLO_SECRETS_PATH`, or `YELLO_WEB_PORT` /
-`YELLO_DEVICE_WS_PORT` for the ports).
+| Designer | On the device |
+|---|---|
+| ![Yello Studio designer](docs/studio_designer.png) | ![Running on the device](docs/device_photo.jpg) |
 
-### Run with Docker
+## Quick start
 
-```sh
-docker compose up --build -d
-```
+1. **Start the server** (designs persist in `studio.json`, credentials in
+   `secrets.json` next to the working directory):
 
-The compose stack publishes the designer on `8080`, the ESP32 WebSocket gateway
-on `8765`, and keeps designs and dashboard secrets in the `yello-data` volume
-(`/data/studio.json`, `/data/secrets.json`). Runtime data and credentials are
-excluded from both Git and image build contexts.
+   ```sh
+   cargo run --release --manifest-path server-rs/Cargo.toml
+   ```
+
+   or with Docker (state kept in the `yello-data` volume):
+
+   ```sh
+   docker compose up --build -d
+   ```
+
+2. **Flash the ESP32** (first-boot setup asks for Wi-Fi and the server
+   address on the touchscreen):
+
+   ```sh
+   cd firmware
+   . /home/john/esp/esp-idf/export.sh
+   sg dialout -c "idf.py -p /dev/ttyUSB0 flash"
+   ```
+
+3. **Design.** Open <http://127.0.0.1:8080/>, pick your screen, drag blocks,
+   and press **Save & apply**. The server listens on `8080` (browser UI) and
+   `8765` (device WebSocket) — configure paths/ports via `YELLO_STUDIO_PATH`,
+   `YELLO_SECRETS_PATH`, `YELLO_WEB_PORT`, and `YELLO_DEVICE_WS_PORT`.
+
+## Yello Studio
 
 The designer supports text, clocks, external text, buttons, screen buttons, images, color
 blocks, sandboxed scripts, Home Assistant sensor values, and Home Assistant entity toggles. Blocks

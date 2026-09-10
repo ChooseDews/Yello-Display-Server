@@ -27,6 +27,10 @@ history/
 # Images (screenshots, captures)
 *.jpg
 *.png
+# Documentation images are tracked
+!docs/studio_designer.png
+!docs/device_photo.jpg
+!docs/ui_designer_demo.png
 
 # ESP-IDF build artifacts / secrets
 firmware/build/
