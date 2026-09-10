@@ -49,13 +49,61 @@ jobs:
 
   container:
     needs: server-tests
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and optionally publish platform image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'push' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Export digest
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - name: Upload digest
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  container-merge:
+    needs: container
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: /tmp/digests
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -70,17 +118,12 @@ jobs:
             type=ref,event=tag
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
-      - name: Build and optionally publish container
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create and publish multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
 
   windows-exe:
     needs: server-tests
@@ -132,9 +175,52 @@ jobs:
           Categories=Development;Utility;
           EOF
           cp AppDir/usr/share/applications/yello-server.desktop AppDir/yello-server.desktop
-          sudo apt-get update -q && sudo apt-get install -y --no-install-recommends imagemagick
-          magick -size 256x256 xc:"#F5A623" -fill black -gravity center \
-            -pointsize 170 -annotate 0 "Y" AppDir/yello.png
+          python3 - <<'EOF'
+          import zlib
+
+          W = H = 256
+          BG = (245, 166, 35)  # #F5A623
+          FG = (0, 0, 0)
+
+          glyph = [
+              "X...X",
+              "X...X",
+              ".X.X.",
+              "..X..",
+              "..X..",
+              "..X..",
+              "..X..",
+          ]
+
+          cell = 32
+          gw, gh = 5 * cell, 7 * cell
+          ox, oy = (W - gw) // 2, (H - gh) // 2
+          pix = [[BG] * W for _ in range(H)]
+          for gy, row in enumerate(glyph):
+              for gx, c in enumerate(row):
+                  if c == "X":
+                      for dy in range(cell):
+                          y = oy + gy * cell + dy
+                          for dx in range(cell):
+                              x = ox + gx * cell + dx
+                              pix[y][x] = FG
+
+          raw = bytearray()
+          for row in pix:
+              raw.append(0)
+              for px in row:
+                  raw.extend(px)
+
+          def chunk(tag, data):
+              c = tag + data
+              return len(data).to_bytes(4, "big") + c + zlib.crc32(c).to_bytes(4, "big")
+
+          png = (b"\x89PNG\r\n\x1a\n"
+                 + chunk(b"IHDR", bytes((0, 0, 1, 0, 0, 0, 1, 0, 8, 2, 0, 0, 0)))
+                 + chunk(b"IDAT", zlib.compress(bytes(raw)))
+                 + chunk(b"IEND", b""))
+          open("AppDir/yello.png", "wb").write(png)
+          EOF
           cat > AppDir/AppRun <<'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
