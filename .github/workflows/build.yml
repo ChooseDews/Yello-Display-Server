@@ -124,7 +124,8 @@ jobs:
           Categories=Development;Utility;
           EOF
           cp AppDir/usr/share/applications/yello-server.desktop AppDir/yello-server.desktop
-          convert -size 256x256 xc:"#F5A623" -fill black -gravity center \
+          sudo apt-get update -q && sudo apt-get install -y --no-install-recommends imagemagick
+          magick -size 256x256 xc:"#F5A623" -fill black -gravity center \
             -pointsize 170 -annotate 0 "Y" AppDir/yello.png
           cat > AppDir/AppRun <<'EOF'
           #!/bin/sh
