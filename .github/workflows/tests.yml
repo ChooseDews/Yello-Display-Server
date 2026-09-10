@@ -1,0 +1,17 @@
+name: Server tests
+on:
+  workflow_call:
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
+      - name: Run Rust server tests
+        run: cargo test --release --manifest-path server-rs/Cargo.toml
+      - name: Check browser JavaScript syntax
+        run: node --check server-rs/static/app.js

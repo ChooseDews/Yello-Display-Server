@@ -1,6 +1,9 @@
 # ESP Yello Device
 
 [![Build and package](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/build.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/build.yml)
+[![Docker image](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/docker.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/docker.yml)
+[![Windows build](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/windows.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/windows.yml)
+[![Linux AppImage](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/linux.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/linux.yml)
 
 Turn a "Cheap Yellow Display" (ESP32-2432S028R, 2.8" ILI9341 touch screen) into
 a network-rendered touch dashboard. A Rust server owns layout, rendering, and
@@ -149,12 +152,12 @@ Each run archives a timestamped copy under `history/snapshots/`.
 
 ## Continuous integration
 
-The GitHub Actions workflow runs server tests, syntax-checks the browser app,
-builds downloadable ESP32 flash artifacts, and builds multi-architecture
-container images. Pushes to `main` and `v*` tags publish the image to
-`ghcr.io/<owner>/<repository>`. It also builds a portable Windows bundle
-(`yello-server.exe` + static assets) and a Linux AppImage; on `v*` tags both are
-attached to the GitHub release.
+Continuous integration is split into four workflows: server tests (shared via
+a reusable workflow), firmware flash artifacts, multi-architecture container
+images published to `ghcr.io/<owner>/<repository>`, plus a portable Windows
+bundle (`yello-server.exe` + static assets) and a Linux AppImage. Pushes run
+all of them; on `v*` tags the container is published and the Windows bundle and
+AppImage are attached to the GitHub release.
 
 See [AGENTS.md](AGENTS.md) for confirmed pin mappings, panel quirks, capture
 instructions, and the wire-protocol constraints.
