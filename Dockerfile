@@ -1,29 +1,39 @@
-FROM ghcr.io/astral-sh/uv:0.8.14 AS uv
+FROM rust:1-slim AS build
 
-FROM python:3.12-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential perl pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=uv /uv /uvx /bin/
+WORKDIR /src
+COPY server-rs/Cargo.toml server-rs/Cargo.lock ./
+COPY server-rs/src ./src
+RUN cargo build --release
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    YELLO_WEB_HOST=0.0.0.0 \
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r -g 10001 yello && useradd -r -g yello -u 10001 yello \
+    && mkdir -p /data && chown yello:yello /data
+
+ENV YELLO_WEB_HOST=0.0.0.0 \
     YELLO_WEB_PORT=8080 \
     YELLO_DEVICE_HOST=0.0.0.0 \
     YELLO_DEVICE_WS_PORT=8765 \
-    YELLO_DATA_DIR=/data
+    YELLO_STUDIO_PATH=/data/studio.json \
+    YELLO_SECRETS_PATH=/data/secrets.json \
+    YELLO_STATIC_DIR=/app/static
 
 WORKDIR /app
-COPY server/pyproject.toml server/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
-
-COPY server/ ./
-RUN mkdir -p /data && chown -R 10001:10001 /app /data
+COPY --from=build /src/target/release/yello-server ./
+COPY server-rs/static ./static
 
 USER 10001:10001
 VOLUME ["/data"]
 EXPOSE 8080 8765
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/status', timeout=3).read()"]
+  CMD ["curl", "-fsS", "http://127.0.0.1:8080/api/status"]
 
-CMD ["/app/.venv/bin/python", "server.py"]
+CMD ["/app/yello-server"]

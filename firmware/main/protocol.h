@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-/* Wire protocol shared with server/protocol.py — keep both in sync by hand. */
+/* Wire protocol shared with server-rs/src/protocol/mod.rs — keep both in sync by hand. */
 
 #define YELLO_PROTO_MAGIC   0x59 /* 'Y' */
 #define YELLO_PROTO_VERSION 1

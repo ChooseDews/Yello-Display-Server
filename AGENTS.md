@@ -61,14 +61,24 @@ WiFi credentials + WS server host/port live in `sdkconfig` (gitignored) under
 
 The firmware is a remote display: it connects to a WebSocket server, blits
 received zone updates (see `firmware/main/protocol.h`, mirrored byte-for-byte
-in `server/protocol.py` — change together), and sends touch events back.
-Zone pixel payloads are big-endian RGB565 (ILI9341-native) so the device
+in `server-rs/src/protocol/mod.rs` — change together), and sends touch events
+back. Zone pixel payloads are big-endian RGB565 (ILI9341-native) so the device
 blits without swapping; headers are little-endian. Keep each zone message
 ≤ ~480 px area (~1KB) to fit the esp_websocket_client RX buffer.
 
-## Reference server (`server/`)
+## Server (`server-rs/`)
 
-`uv`-managed Python WebSocket server that renders a clock + message with
-Pillow and streams dirty-region updates each second; tap events draw a
-temporary dot. Run with `uv run server.py` from `server/` (stdin commands:
-`text <message>`, `refresh`).
+Rust (tokio + hyper) WebSocket/HTTP server that owns layout, rendering, and
+the Yello Studio browser designer; streams dirty-region zone updates and
+handles touch events. Build/test:
+
+```sh
+cargo build --release --manifest-path server-rs/Cargo.toml
+cargo test --manifest-path server-rs/Cargo.toml
+```
+
+Run with `cargo run --release --manifest-path server-rs/Cargo.toml`
+(web studio on `8080`, device gateway on `8765`). Config: `studio.json` /
+`secrets.json` next to the working directory; override paths/ports with
+`YELLO_STUDIO_PATH`, `YELLO_SECRETS_PATH`, `YELLO_STATIC_DIR`,
+`YELLO_WEB_PORT`, `YELLO_DEVICE_WS_PORT`.

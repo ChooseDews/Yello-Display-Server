@@ -119,6 +119,30 @@ button:not(:disabled):hover { border-color: #596275; background: #242a36; }
 .view-toggle { display: flex; align-items: center; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: #0d1016; }
 .view-toggle button { min-width: 66px; height: 25px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 10px; }
 .view-toggle button.active { color: #191507; background: var(--accent); font-weight: 750; }
+.connections-toggle { height: 27px; padding: 0 12px; border-radius: 7px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.connections-toggle.active { color: #191507; background: var(--accent); border-color: #c99f20; font-weight: 750; }
+
+.flow-canvas { position: relative; width: 100%; display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 88px 72px; padding: 8px; }
+.flow-canvas.hidden { display: none !important; }
+.flow-connectors { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; overflow: visible; }
+.flow-screen { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 8px; }
+.flow-screen > header { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 22px; padding: 0 2px; border: 0; background: none; color: #aab2c2; font-size: 11px; text-align: left; cursor: pointer; }
+.flow-screen > header:hover strong { color: var(--text); }
+.flow-screen > header strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-screen.editing > header strong { color: var(--text); }
+.flow-badge { flex: 0 0 auto; padding: 2px 7px; border-radius: 9px; background: var(--accent); color: #191507; font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+.flow-badge.hidden { display: none; }
+.flow-dirty-dot { flex: 0 0 auto; opacity: 0; color: var(--accent); font-size: 13px; line-height: 1; }
+.flow-dirty-dot.visible { opacity: 1; }
+.flow-screen .device-shell { border-radius: 11px; box-shadow: 0 10px 34px #0008, 0 0 0 7px #252a34, 0 0 0 8px #404857; }
+.flow-screen.editing .device-shell { box-shadow: 0 10px 34px #0008, 0 0 0 7px #252a34, 0 0 0 8px var(--accent); }
+.screen-preview { display: block; image-rendering: pixelated; pointer-events: none; user-select: none; }
+.element-box.link-box { border-color: #6b9cff66; }
+.flow-missing {
+  width: 240px; height: 320px; display: grid; place-items: center; padding: 24px;
+  border: 2px dashed #6e3440; border-radius: 13px; color: var(--danger);
+  font-size: 11px; text-align: center; line-height: 1.55;
+}
 .zoom-control { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .zoom-control button { width: 29px; height: 27px; border: 0; border-radius: 0; }
 .zoom-control span { width: 52px; text-align: center; color: #b5bdcb; font-size: 11px; }

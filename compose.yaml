@@ -8,9 +8,9 @@ services:
     environment:
       YELLO_WEB_HOST: 0.0.0.0
       YELLO_DEVICE_HOST: 0.0.0.0
-      YELLO_DATA_DIR: /data
-      # Add private integration/source hosts only when they are intentionally used.
-      YELLO_ALLOWED_HTTP_HOSTS: ${YELLO_ALLOWED_HTTP_HOSTS:-}
+      # Studio/secrets live on the yello-data volume.
+      YELLO_STUDIO_PATH: /data/studio.json
+      YELLO_SECRETS_PATH: /data/secrets.json
     ports:
       - "8080:8080"
       - "8765:8765"

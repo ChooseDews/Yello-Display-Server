@@ -84,6 +84,7 @@
           <button id="code-mode" type="button">Code</button>
           <button id="live-mode" type="button">Live view</button>
         </div>
+        <button id="show-connections" class="connections-toggle" type="button" aria-pressed="false" title="Show every screen reachable from this design through screen buttons (design links), connected with arrows — edit a whole flow at once">⇄ Connections</button>
         <div class="zoom-control">
           <button id="zoom-out" aria-label="Zoom out">−</button>
           <span id="zoom-label">200%</span>
@@ -91,6 +92,9 @@
         </div>
       </div>
       <div id="canvas-scroll" class="canvas-scroll">
+        <div id="flow-canvas" class="flow-canvas hidden" aria-label="Connected screens flow">
+          <svg id="flow-connectors" class="flow-connectors" aria-hidden="true"></svg>
+        </div>
         <div id="device-shell" class="device-shell">
           <div id="stage" class="stage">
             <img id="preview" width="240" height="320" alt="Rendered device preview" draggable="false">
@@ -115,7 +119,7 @@
       </div>
       <div class="canvas-footer">
         <span id="preview-status">Authoritative server preview</span>
-        <span>Drag blocks · Arrow keys nudge · Shift for 10 px</span>
+          <span>Drag blocks · Arrow keys nudge (Shift = 10 px) · ⇄ Connections to edit a whole flow</span>
       </div>
     </section>
 

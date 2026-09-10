@@ -25,6 +25,18 @@ let liveMode = false;
 let canvasMode = "edit";
 let codeEditorDirty = false;
 let activeModal = null;
+let flowMode = false;
+let flowOrder = [];
+let flowStructureKey = "";
+let flowMissing = new Set();
+let designLayouts = new Map();
+let designRevisions = new Map();
+let flowDirty = new Set();
+let flowFetches = new Map();
+let screenPreviewUrls = new Map();
+let screenPreviewTimers = new Map();
+let flowRebuildTimer = null;
+let editingDesignId = null;
 
 const $ = (id) => document.getElementById(id);
 const clone = (value) => structuredClone(value);
@@ -80,44 +92,66 @@ function uniqueId(prefix) {
   return candidate;
 }
 
-function pushHistory() {
-  undoStack.push(clone(layout));
+function pushHistory(designId = editingDesignId ?? currentDesignId) {
+  undoStack.push({ designId, layout: clone(designLayouts.get(designId) || layout) });
   if (undoStack.length > 80) undoStack.shift();
   redoStack = [];
 }
 
-function commit(mutator) {
-  pushHistory();
+function commit(mutator, designId = editingDesignId) {
+  pushHistory(designId);
   mutator();
   dirty = true;
+  if (flowMode && designId) flowDirty.add(designId);
   renderAll();
   schedulePreview();
+  if (flowMode) ensureFlowSoon();
 }
 
 function undo() {
-  if (!undoStack.length) return;
-  redoStack.push(clone(layout));
-  layout = undoStack.pop();
-  if (!selected()) selectedId = null;
-  dirty = true;
-  renderAll();
-  schedulePreview();
+  while (undoStack.length) {
+    const entry = undoStack.pop();
+    if (!flowMode && entry.designId !== currentDesignId) continue;
+    redoStack.push({ designId: editingDesignId ?? currentDesignId, layout: clone(layout) });
+    editingDesignId = entry.designId;
+    layout = entry.layout;
+    designLayouts.set(entry.designId, layout);
+    if (!selected()) selectedId = null;
+    dirty = true;
+    if (flowMode) flowDirty.add(entry.designId);
+    renderAll();
+    schedulePreview();
+    if (flowMode) ensureFlowSoon();
+    return;
+  }
 }
 
 function redo() {
   if (!redoStack.length) return;
-  undoStack.push(clone(layout));
-  layout = redoStack.pop();
+  const entry = redoStack.pop();
+  if (!flowMode && entry.designId !== currentDesignId) return redo();
+  undoStack.push({ designId: editingDesignId ?? currentDesignId, layout: clone(layout) });
+  editingDesignId = entry.designId;
+  layout = entry.layout;
+  designLayouts.set(entry.designId, layout);
   if (!selected()) selectedId = null;
   dirty = true;
+  if (flowMode) flowDirty.add(entry.designId);
   renderAll();
   schedulePreview();
+  if (flowMode) ensureFlowSoon();
 }
 
 function setDocumentState(message = "") {
-  const designName = studio.designs.find((item) => item.id === currentDesignId)?.name || layout?.name || "Design";
-  const changed = dirty || codeEditorDirty;
-  $("document-state").textContent = message || `${designName} · ${changed ? codeEditorDirty ? "JSON changes not applied" : "Unsaved changes" : `Revision ${appliedRevision}`}`;
+  const editingId = flowMode ? editingDesignId : currentDesignId;
+  const designName = studio.designs.find((item) => item.id === editingId)?.name || layout?.name || "Design";
+  const revision = flowMode ? designRevisions.get(editingId) ?? appliedRevision : appliedRevision;
+  const unsavedScreens = flowMode ? flowDirty.size : (dirty || codeEditorDirty ? 1 : 0);
+  const changed = unsavedScreens > 0 || codeEditorDirty;
+  const stateText = changed
+    ? codeEditorDirty ? "JSON changes not applied" : unsavedScreens > 1 ? `${unsavedScreens} screens unsaved` : "Unsaved changes"
+    : `Revision ${revision}`;
+  $("document-state").textContent = message || `${designName} · ${stateText}`;
   $("save").disabled = !changed;
   $("undo").disabled = undoStack.length === 0;
   $("redo").disabled = redoStack.length === 0;
@@ -258,9 +292,17 @@ function hideContextMenu() {
   $("canvas-menu").classList.add("hidden");
 }
 
-function showContextMenu(event, element) {
+function showContextMenu(event, element, designId = currentDesignId) {
   event.preventDefault();
   event.stopPropagation();
+  if (flowMode && designId !== editingDesignId) {
+    editingDesignId = designId;
+    layout = designLayouts.get(designId) || layout;
+    dirty = flowDirty.has(designId);
+    document.querySelectorAll("#flow-canvas .flow-screen").forEach((card) => {
+      card.classList.toggle("editing", card.dataset.designId === designId);
+    });
+  }
   selectedId = element.id;
   renderAll();
   const menu = $("canvas-menu");
@@ -292,7 +334,8 @@ function renderDocumentFields() {
 function renderLayers() {
   const list = $("layer-list");
   list.replaceChildren();
-  $("layer-count").textContent = `${layout.elements.length} block${layout.elements.length === 1 ? "" : "s"}`;
+  const blockLabel = flowMode ? ` · ${designNameOf(editingDesignId ?? currentDesignId)}` : "";
+  $("layer-count").textContent = `${layout.elements.length} block${layout.elements.length === 1 ? "" : "s"}${blockLabel}`;
   [...layout.elements].reverse().forEach((element) => {
     const row = document.createElement("div");
     row.className = `layer-row${element.id === selectedId ? " selected" : ""}${element.visible ? "" : " hidden-layer"}`;
@@ -327,25 +370,31 @@ function renderLayers() {
 }
 
 function renderOverlay() {
-  const overlay = $("canvas-overlay");
+  renderElementOverlay(currentDesignId, $("canvas-overlay"));
+}
+
+function renderElementOverlay(designId, overlay) {
+  const elements = designLayouts.get(designId)?.elements || [];
   overlay.replaceChildren();
-  layout.elements.forEach((element) => {
+  elements.forEach((element) => {
     if (!element.visible) return;
     const frame = element.frame;
     const box = document.createElement("div");
-    box.className = `element-box${element.id === selectedId ? " selected" : ""}${element.locked ? " locked" : ""}`;
+    const isSelected = element.id === selectedId && designId === editingDesignId;
+    const isLink = element.type === "design-link";
+    box.className = `element-box${isSelected ? " selected" : ""}${element.locked ? " locked" : ""}${flowMode && isLink ? " link-box" : ""}`;
     box.dataset.elementId = element.id;
     Object.assign(box.style, {
       left: `${frame.x}px`, top: `${frame.y}px`, width: `${frame.w}px`, height: `${frame.h}px`,
     });
-    box.onpointerdown = (event) => beginPointerInteraction(event, element, null);
-    box.oncontextmenu = (event) => showContextMenu(event, element);
-    if (element.id === selectedId && !element.locked) {
+    box.onpointerdown = (event) => beginPointerInteraction(event, element, null, designId);
+    box.oncontextmenu = (event) => showContextMenu(event, element, designId);
+    if (isSelected && !element.locked) {
       for (const handleName of ["nw", "ne", "sw", "se"]) {
         const handle = document.createElement("span");
         handle.className = "resize-handle";
         handle.dataset.handle = handleName;
-        handle.onpointerdown = (event) => beginPointerInteraction(event, element, handleName);
+        handle.onpointerdown = (event) => beginPointerInteraction(event, element, handleName, designId);
         box.append(handle);
       }
       const tag = document.createElement("span");
@@ -357,9 +406,17 @@ function renderOverlay() {
   });
 }
 
-function beginPointerInteraction(event, element, handle) {
+function beginPointerInteraction(event, element, handle, designId = currentDesignId) {
   event.preventDefault();
   event.stopPropagation();
+  const [dWidth, dHeight] = designDims(designId);
+  if (editingDesignId !== designId) {
+    editingDesignId = designId;
+    layout = designLayouts.get(designId) || layout;
+    document.querySelectorAll("#flow-canvas .flow-screen").forEach((card) => {
+      card.classList.toggle("editing", card.dataset.designId === designId);
+    });
+  }
   if (selectedId !== element.id) {
     selectedId = element.id;
     renderLayers();
@@ -380,16 +437,17 @@ function beginPointerInteraction(event, element, handle) {
     const dx = Math.round((moveEvent.clientX - startX) / zoom);
     const dy = Math.round((moveEvent.clientY - startY) / zoom);
     if (!started && (dx !== 0 || dy !== 0)) {
-      pushHistory();
+      pushHistory(designId);
       started = true;
       dirty = true;
+      if (flowMode) flowDirty.add(designId);
     }
     if (!started) return;
     if (!handle) {
-      element.frame.x = Math.max(0, Math.min(displayWidth() - element.frame.w, origin.x + dx));
-      element.frame.y = Math.max(0, Math.min(displayHeight() - element.frame.h, origin.y + dy));
+      element.frame.x = Math.max(0, Math.min(dWidth - element.frame.w, origin.x + dx));
+      element.frame.y = Math.max(0, Math.min(dHeight - element.frame.h, origin.y + dy));
     } else {
-      resizeFrame(element.frame, origin, handle, dx, dy);
+      resizeFrame(element.frame, origin, handle, dx, dy, dWidth, dHeight);
     }
     Object.assign(box.style, {
       left: `${element.frame.x}px`, top: `${element.frame.y}px`,
@@ -398,7 +456,7 @@ function beginPointerInteraction(event, element, handle) {
     const sizeTag = box.querySelector(".size-tag");
     if (sizeTag) sizeTag.textContent = `${element.frame.w} × ${element.frame.h}`;
     setDocumentState();
-    schedulePreview();
+    scheduleScreenPreview(designId);
   };
   const end = () => {
     target.removeEventListener("pointermove", move);
@@ -411,16 +469,16 @@ function beginPointerInteraction(event, element, handle) {
   target.addEventListener("pointercancel", end);
 }
 
-function resizeFrame(frame, origin, handle, dx, dy) {
+function resizeFrame(frame, origin, handle, dx, dy, dWidth = displayWidth(), dHeight = displayHeight()) {
   const minSize = 8;
   let left = origin.x;
   let top = origin.y;
   let right = origin.x + origin.w;
   let bottom = origin.y + origin.h;
   if (handle.includes("w")) left = Math.max(0, Math.min(right - minSize, origin.x + dx));
-  if (handle.includes("e")) right = Math.min(displayWidth(), Math.max(left + minSize, origin.x + origin.w + dx));
+  if (handle.includes("e")) right = Math.min(dWidth, Math.max(left + minSize, origin.x + origin.w + dx));
   if (handle.includes("n")) top = Math.max(0, Math.min(bottom - minSize, origin.y + dy));
-  if (handle.includes("s")) bottom = Math.min(displayHeight(), Math.max(top + minSize, origin.y + origin.h + dy));
+  if (handle.includes("s")) bottom = Math.min(dHeight, Math.max(top + minSize, origin.y + origin.h + dy));
   Object.assign(frame, { x: left, y: top, w: right - left, h: bottom - top });
 }
 
@@ -462,9 +520,17 @@ function appendField(container, label, value, options, setter) {
     const next = input.type === "number" ? Number(input.value) : input.type === "checkbox" ? input.checked : input.value;
     setter(next);
     dirty = true;
-    renderOverlay();
+    if (flowMode && editingDesignId) flowDirty.add(editingDesignId);
+    if (flowMode && canvasMode === "edit") {
+      const overlay = $("flow-canvas")?.querySelector(`.flow-screen[data-design-id="${CSS.escape(editingDesignId)}"] .canvas-overlay`);
+      if (overlay) renderElementOverlay(editingDesignId, overlay);
+      drawFlowArrows();
+    } else {
+      renderOverlay();
+    }
     setDocumentState();
     schedulePreview();
+    if (flowMode) ensureFlowSoon();
   };
   input.onchange = () => renderAll();
   container.append(labelElement, input);
@@ -664,15 +730,360 @@ function renderResourceEditor(element) {
 function renderAll() {
   renderDocumentFields();
   renderLayers();
-  renderOverlay();
+  if (flowMode && canvasMode === "edit") renderFlow();
+  else renderOverlay();
   renderInspector();
   if (canvasMode === "code" && !codeEditorDirty) syncCodeEditor(true);
   setDocumentState();
 }
 
+function designDims(designId) {
+  const lay = designLayouts.get(designId) || layout;
+  return lay?.orientation === "landscape" ? [320, 240] : [240, 320];
+}
+
+function designNameOf(designId) {
+  return studio.designs.find((design) => design.id === designId)?.name || designId;
+}
+
+function switchEditingDesign(designId) {
+  if (!designLayouts.has(designId) || designId === editingDesignId) return;
+  editingDesignId = designId;
+  layout = designLayouts.get(designId);
+  selectedId = null;
+  dirty = flowDirty.has(designId);
+  renderAll();
+  if (canvasMode === "edit" && flowMode) {
+    $("preview-status").textContent = `Flow view · editing ${designNameOf(designId)}`;
+  }
+  schedulePreview();
+}
+
+async function fetchDesignLayout(designId, { force = false } = {}) {
+  if (force) {
+    designLayouts.delete(designId);
+    flowMissing.delete(designId);
+  } else {
+    if (designLayouts.has(designId) || flowMissing.has(designId)) return false;
+    const pending = flowFetches.get(designId);
+    if (pending) return pending;
+  }
+  if (!studio.designs.some((design) => design.id === designId)) {
+    flowMissing.add(designId);
+    return false;
+  }
+  const load = (async () => {
+    try {
+      const response = await fetch(`/api/layout?design=${encodeURIComponent(designId)}`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not load design");
+      designLayouts.set(designId, result.layout);
+      designRevisions.set(designId, result.revision);
+      flowMissing.delete(designId);
+      return true;
+    } catch {
+      flowMissing.add(designId);
+      return false;
+    } finally {
+      flowFetches.delete(designId);
+    }
+  })();
+  flowFetches.set(designId, load);
+  return load;
+}
+
+function collectFlowOrder() {
+  const order = [currentDesignId];
+  const seen = new Set([currentDesignId]);
+  for (let index = 0; index < order.length; index++) {
+    const lay = designLayouts.get(order[index]);
+    if (!lay) continue;
+    for (const element of lay.elements) {
+      if (element.type === "design-link" && element.visible !== false) {
+        const target = element.props?.targetDesignId;
+        if (target && !seen.has(target)) {
+          seen.add(target);
+          order.push(target);
+        }
+      }
+    }
+  }
+  return order;
+}
+
+function ensureFlowSoon(delay = 250) {
+  clearTimeout(flowRebuildTimer);
+  flowRebuildTimer = setTimeout(() => {
+    rebuildFlow().catch((error) => toast(error.message, true));
+  }, delay);
+}
+
+async function rebuildFlow() {
+  flowOrder = collectFlowOrder();
+  let pending = flowOrder.filter((id) => !designLayouts.has(id) && !flowMissing.has(id));
+  while (pending.length) {
+    await Promise.all(pending.map((id) => fetchDesignLayout(id)));
+    const next = collectFlowOrder();
+    const grew = next.length > flowOrder.length || next.some((id, index) => flowOrder[index] !== id);
+    flowOrder = next;
+    pending = flowOrder.filter((id) => !designLayouts.has(id) && !flowMissing.has(id));
+    if (!pending.length && !grew) break;
+  }
+  flowOrder = collectFlowOrder();
+  syncFlowCards();
+  applyZoom();
+  renderAll();
+  await Promise.all(flowOrder.filter((id) => designLayouts.has(id)).map((id) => refreshScreenPreview(id)));
+}
+
+async function setShowConnections(enabled) {
+  if (enabled === flowMode) return;
+  if (enabled) {
+    flowMode = true;
+    flowMissing = new Set();
+    $("show-connections").classList.add("active");
+    $("show-connections").setAttribute("aria-pressed", "true");
+    if (dirty) flowDirty.add(currentDesignId);
+    if (canvasMode === "edit") {
+      $("device-shell").classList.add("hidden");
+      $("canvas-overlay").classList.add("hidden");
+      $("flow-canvas").classList.remove("hidden");
+      $("preview-status").textContent = `Flow view · editing ${designNameOf(editingDesignId ?? currentDesignId)}`;
+    }
+    await rebuildFlow();
+    return;
+  }
+  const others = [...flowDirty].filter((id) => id !== currentDesignId);
+  if (others.length) {
+    const discard = await appConfirm({
+      title: "Discard unsaved changes in other screens?",
+      message: `${others.length} other screen${others.length === 1 ? "" : "s"} in this flow have unsaved changes. Save first, or discard them.`,
+      confirmLabel: "Discard changes", danger: true,
+    });
+    if (!discard) {
+      $("show-connections").classList.add("active");
+      $("show-connections").setAttribute("aria-pressed", "true");
+      return;
+    }
+    await Promise.all(others.map((id) => fetchDesignLayout(id, { force: true })));
+  }
+  flowMode = false;
+  flowStructureKey = "";
+  editingDesignId = currentDesignId;
+  layout = designLayouts.get(currentDesignId) || layout;
+  selectedId = null;
+  dirty = flowDirty.has(currentDesignId);
+  $("show-connections").classList.remove("active");
+  $("show-connections").setAttribute("aria-pressed", "false");
+  $("flow-canvas").classList.add("hidden");
+  $("device-shell").classList.remove("hidden");
+  $("canvas-overlay").classList.remove("hidden");
+  renderAll();
+  schedulePreview(0);
+}
+
+function buildFlowCard(designId) {
+  const card = document.createElement("div");
+  card.className = "flow-screen";
+  card.dataset.designId = designId;
+  const header = document.createElement("header");
+  header.onclick = () => switchEditingDesign(designId);
+  if (designId === currentDesignId) {
+    const badge = document.createElement("span");
+    badge.className = "flow-badge";
+    badge.textContent = "Root";
+    header.append(badge);
+  }
+  const name = document.createElement("strong");
+  name.textContent = studio.designs.find((design) => design.id === designId)?.name || designId;
+  header.append(name);
+  const dirtyDot = document.createElement("span");
+  dirtyDot.className = "flow-dirty-dot";
+  dirtyDot.textContent = "●";
+  header.append(dirtyDot);
+  card.append(header);
+  const lay = designLayouts.get(designId);
+  if (lay) {
+    const shell = document.createElement("div");
+    shell.className = "device-shell";
+    const stage = document.createElement("div");
+    stage.className = "stage";
+    const img = document.createElement("img");
+    img.id = `screen-preview-${designId}`;
+    img.className = "screen-preview";
+    img.alt = `${name.textContent || designId} rendered preview`;
+    img.draggable = false;
+    if (screenPreviewUrls.has(designId)) img.src = screenPreviewUrls.get(designId);
+    const overlay = document.createElement("div");
+    overlay.className = "canvas-overlay";
+    overlay.dataset.designId = designId;
+    overlay.onclick = (event) => {
+      if (event.target === overlay) {
+        selectedId = null;
+        renderAll();
+      }
+    };
+    overlay.oncontextmenu = (event) => {
+      if (event.target === overlay) {
+        const element = lay.elements.find((item) => item.id === selectedId);
+        if (element) showContextMenu(event, element, designId);
+      }
+    };
+    stage.append(img, overlay);
+    shell.append(stage);
+    card.append(shell);
+  } else {
+    const missing = document.createElement("div");
+    missing.className = "flow-missing";
+    missing.textContent = `Design “${designId}” not found on the server`;
+    card.append(missing);
+  }
+  return card;
+}
+
+function syncFlowCards() {
+  const canvas = $("flow-canvas");
+  const key = `${currentDesignId}|${flowOrder.join("|")}`;
+  if (key !== flowStructureKey) {
+    flowStructureKey = key;
+    canvas.querySelectorAll(".flow-screen").forEach((card) => card.remove());
+    for (const designId of flowOrder) canvas.append(buildFlowCard(designId));
+  }
+  for (const card of canvas.querySelectorAll(".flow-screen")) {
+    const designId = card.dataset.designId;
+    card.classList.toggle("editing", designId === editingDesignId);
+    card.querySelector(".flow-badge")?.classList.toggle("hidden", designId !== currentDesignId);
+    card.querySelector(".flow-dirty-dot")?.classList.toggle("visible", flowDirty.has(designId));
+    const name = card.querySelector("header strong");
+    if (name) name.textContent = studio.designs.find((design) => design.id === designId)?.name || designId;
+  }
+}
+
+function renderFlow() {
+  syncFlowCards();
+  for (const card of $("flow-canvas").querySelectorAll(".flow-screen")) {
+    const designId = card.dataset.designId;
+    const overlay = card.querySelector(".canvas-overlay");
+    if (overlay && designLayouts.has(designId)) renderElementOverlay(designId, overlay);
+  }
+  drawFlowArrows();
+}
+
+function drawFlowArrows() {
+  const canvas = $("flow-canvas");
+  const svg = $("flow-connectors");
+  if (!canvas || !svg || canvas.classList.contains("hidden")) return;
+  const base = canvas.getBoundingClientRect();
+  svg.innerHTML = '<defs>'
+    + '<marker id="flow-arrow-head" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto-start-reverse"><path d="M0,0 L7,3.5 L0,7 Z" fill="#6b9cff"></path></marker>'
+    + '<marker id="flow-arrow-head-missing" markerWidth="7" markerHeight="7" refX="6" refY="3.5"><path d="M0,0 L7,3.5 L0,7 Z" fill="#ff6577"></path></marker>'
+    + '</defs>';
+  for (const fromDesign of flowOrder) {
+    const lay = designLayouts.get(fromDesign);
+    if (!lay) continue;
+    for (const element of lay.elements) {
+      if (element.type !== "design-link" || element.visible === false) continue;
+      const targetId = element.props?.targetDesignId;
+      if (!targetId || targetId === fromDesign) continue;
+      const card = canvas.querySelector(`.flow-screen[data-design-id="${CSS.escape(fromDesign)}"]`);
+      const box = card?.querySelector(`.element-box[data-element-id="${CSS.escape(element.id)}"]`);
+      if (!card || !box) continue;
+      const start = box.getBoundingClientRect();
+      const targetCard = canvas.querySelector(`.flow-screen[data-design-id="${CSS.escape(targetId)}"]`);
+      let end = null;
+      if (targetCard) {
+        const shell = targetCard.querySelector(".device-shell") || targetCard.querySelector(".flow-missing");
+        if (!shell) continue;
+        const rect = shell.getBoundingClientRect();
+        end = { x: rect.left + rect.width / 2, y: rect.top };
+      } else {
+        end = { x: start.left + start.width / 2, y: start.bottom + 40 };
+      }
+      const sx = start.left + start.width / 2 - base.left;
+      const sy = start.bottom - base.top;
+      const tx = end.x - base.left;
+      const ty = end.y - base.top;
+      const missing = flowMissing.has(targetId) || !designLayouts.has(targetId);
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", `M ${sx} ${sy} C ${sx} ${sy + 34}, ${tx} ${ty - 34}, ${tx} ${ty}`);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", missing ? "#ff6577" : "#6b9cff");
+      path.setAttribute("stroke-width", "1.6");
+      path.setAttribute("opacity", "0.85");
+      if (missing) path.setAttribute("stroke-dasharray", "4 3");
+      path.setAttribute("marker-end", missing ? "url(#flow-arrow-head-missing)" : "url(#flow-arrow-head)");
+      svg.append(path);
+      const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      dot.setAttribute("cx", `${sx}`);
+      dot.setAttribute("cy", `${sy}`);
+      dot.setAttribute("r", "2.6");
+      dot.setAttribute("fill", missing ? "#ff6577" : "#6b9cff");
+      svg.append(dot);
+    }
+  }
+}
+
 function schedulePreview(delay = 100) {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(refreshPreview, delay);
+}
+
+async function refreshScreenPreview(designId) {
+  const lay = designLayouts.get(designId);
+  if (!lay || flowMissing.has(designId)) return;
+  const img = document.getElementById(`screen-preview-${designId}`);
+  if (!img) return;
+  try {
+    const response = await fetch(`/api/preview?design=${encodeURIComponent(designId)}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(lay),
+    });
+    if (!response.ok) return;
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    img.src = url;
+    const previous = screenPreviewUrls.get(designId);
+    screenPreviewUrls.set(designId, url);
+    if (previous && previous !== url) URL.revokeObjectURL(previous);
+  } catch {
+  }}
+
+function scheduleScreenPreview(designId, delay = 120) {
+  clearTimeout(screenPreviewTimers.get(designId));
+  screenPreviewTimers.set(designId, setTimeout(() => refreshScreenPreview(designId), delay));
+}
+
+async function refreshPreview() {
+  if (flowMode && canvasMode === "edit") {
+    await refreshScreenPreview(editingDesignId ?? currentDesignId);
+    return;
+  }
+  if (!layout) return;
+  previewController?.abort();
+  previewController = new AbortController();
+  $("preview-status").textContent = "Rendering preview…";
+  $("preview-status").classList.add("rendering");
+  try {
+    const response = await fetch(`/api/preview?design=${encodeURIComponent(currentDesignId)}${liveMode ? "&live=1" : ""}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(layout),
+      signal: previewController.signal,
+    });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.errors?.[0]?.message || `Preview failed (${response.status})`);
+    }
+    const blob = await response.blob();
+    const nextUrl = URL.createObjectURL(blob);
+    $("preview").src = nextUrl;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = nextUrl;
+    $("preview-status").textContent = canvasMode === "code" ? "Direct JSON configuration · validate before applying" : liveMode ? "Interactive live render · click to touch" : "Authoritative server preview";
+  } catch (error) {
+    if (error.name !== "AbortError") $("preview-status").textContent = error.message;
+  } finally {
+    $("preview-status").classList.remove("rendering");
+  }
 }
 
 function setCodeEditorState(message, state = "") {
@@ -731,6 +1142,7 @@ async function applyCodeLayout() {
     }
     pushHistory();
     layout = result.layout;
+    designLayouts.set(editingDesignId ?? currentDesignId, layout);
     selectedId = null;
     dirty = true;
     codeEditorDirty = false;
@@ -776,17 +1188,28 @@ async function setCanvasMode(mode) {
   }
   canvasMode = mode;
   liveMode = mode === "live";
+  const flowVisible = flowMode && mode === "edit";
   $("edit-mode").classList.toggle("active", mode === "edit");
   $("code-mode").classList.toggle("active", mode === "code");
   $("live-mode").classList.toggle("active", mode === "live");
   $("canvas-scroll").classList.toggle("hidden", mode === "code");
   $("code-editor-pane").classList.toggle("hidden", mode !== "code");
+  $("flow-canvas").classList.toggle("hidden", !flowVisible);
+  $("device-shell").classList.toggle("hidden", flowVisible);
   $("canvas-overlay").classList.toggle("hidden", mode !== "edit");
   $("live-touch-overlay").classList.toggle("hidden", mode !== "live");
   $("zoom-out").disabled = mode === "code" || zoomIndex === 0;
   $("zoom-in").disabled = mode === "code" || zoomIndex === ZOOM_LEVELS.length - 1;
+  if (mode === "live" && flowMode && editingDesignId !== currentDesignId) {
+    editingDesignId = currentDesignId;
+    layout = designLayouts.get(currentDesignId) || layout;
+    selectedId = null;
+    dirty = flowDirty.has(currentDesignId);
+    renderAll();
+  }
   if (mode === "code") syncCodeEditor(true);
-  $("preview-status").textContent = mode === "live" ? "Interactive live render · click to touch" : mode === "code" ? "Direct JSON configuration · validate before saving" : "Authoritative server preview";
+  if (flowVisible) applyZoom();
+  $("preview-status").textContent = mode === "live" ? "Interactive live render · click to touch" : mode === "code" ? "Direct JSON configuration · validate before applying" : flowMode ? `Flow view · editing ${studio.designs.find((item) => item.id === editingDesignId)?.name || "screen"}` : "Authoritative server preview";
   hideContextMenu();
   setDocumentState();
   if (mode !== "code") schedulePreview(0);
@@ -818,61 +1241,51 @@ async function sendLiveTouch(event) {
   }
 }
 
-async function refreshPreview() {
-  if (!layout) return;
-  previewController?.abort();
-  previewController = new AbortController();
-  $("preview-status").textContent = "Rendering preview…";
-  $("preview-status").classList.add("rendering");
-  try {
-    const response = await fetch(`/api/preview?design=${encodeURIComponent(currentDesignId)}${liveMode ? "&live=1" : ""}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(layout),
-      signal: previewController.signal,
-    });
-    if (!response.ok) {
-      const result = await response.json();
-      throw new Error(result.errors?.[0]?.message || `Preview failed (${response.status})`);
-    }
-    const blob = await response.blob();
-    const nextUrl = URL.createObjectURL(blob);
-    $("preview").src = nextUrl;
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    previewUrl = nextUrl;
-    $("preview-status").textContent = canvasMode === "code" ? "Direct JSON configuration · validate before saving" : liveMode ? "Interactive live render · click to touch" : "Authoritative server preview";
-  } catch (error) {
-    if (error.name !== "AbortError") $("preview-status").textContent = error.message;
-  } finally {
-    $("preview-status").classList.remove("rendering");
-  }
-}
-
 async function saveLayout() {
   if (codeEditorDirty && !await applyCodeLayout()) {
     setDocumentState();
     return;
   }
+  const targets = flowMode
+    ? [...new Set([...flowDirty, ...(dirty && editingDesignId ? [editingDesignId] : [])])]
+    : [currentDesignId];
+  if (!targets.length) {
+    toast("Nothing to save");
+    return;
+  }
   $("save").disabled = true;
-  setDocumentState("Saving and applying…");
+  setDocumentState(targets.length === 1 ? "Saving and applying…" : `Saving ${targets.length} designs…`);
+  let appliedScreens = 0;
   try {
-    const response = await fetch(`/api/layout?design=${encodeURIComponent(currentDesignId)}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(layout),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.errors?.map((item) => `${item.path}: ${item.message}`).join("\n") || "Save failed");
-    appliedRevision = result.revision;
-    dirty = false;
-    const design = studio.designs.find((item) => item.id === currentDesignId);
-    if (design) {
-      design.name = layout.name;
-      design.revision = result.revision;
-      design.orientation = layout.orientation || "portrait";
+    for (const designId of targets) {
+      if (!designId || !designLayouts.has(designId)) continue;
+      const response = await fetch(`/api/layout?design=${encodeURIComponent(designId)}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(designLayouts.get(designId)),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.errors?.map((item) => `${item.path}: ${item.message}`).join("\n") || `Save failed for ${designId}`);
+      }
+      designRevisions.set(designId, result.revision);
+      flowDirty.delete(designId);
+      const design = studio.designs.find((item) => item.id === designId);
+      if (design) {
+        design.name = designLayouts.get(designId).name;
+        design.revision = result.revision;
+        design.orientation = designLayouts.get(designId).orientation || "portrait";
+      }
+      if (designId === currentDesignId) appliedRevision = result.revision;
+      appliedScreens += result.applied ? result.appliedScreens : 0;
+      refreshScreenPreview(designId);
     }
+    dirty = flowMode ? flowDirty.has(editingDesignId) : false;
     renderStudioControls();
     setDocumentState();
-    toast(result.applied ? `Saved and applied to ${result.appliedScreens} screen${result.appliedScreens === 1 ? "" : "s"}` : "Saved — no assigned screen is online");
+    toast(appliedScreens
+      ? `Saved ${targets.length} design${targets.length === 1 ? "" : "s"} · applied to ${appliedScreens} screen${appliedScreens === 1 ? "" : "s"}`
+      : `Saved ${targets.length} design${targets.length === 1 ? "" : "s"} — no assigned screen is online`);
   } catch (error) {
+    if (flowMode) dirty = flowDirty.has(editingDesignId);
     setDocumentState();
     toast(error.message, true);
   }
@@ -1275,11 +1688,17 @@ function selectScreen(screenId) {
 }
 
 async function loadDesign(designId, { discardConfirmed = false } = {}) {
-  if (designId === currentDesignId && layout) return;
-  if ((dirty || codeEditorDirty) && !discardConfirmed) {
+  if (designId === currentDesignId && layout) {
+    if (flowMode) editingDesignId = designId;
+    return true;
+  }
+  const unsaved = dirty || codeEditorDirty || (flowMode && flowDirty.size > 0);
+  if (unsaved && !discardConfirmed) {
     const discard = await appConfirm({
       title: "Discard unsaved changes?",
-      message: codeEditorDirty ? "Unapplied JSON and other unsaved design changes will be lost." : "Unsaved design changes will be lost when you switch screens.",
+      message: flowMode && flowDirty.size > 1
+        ? `${flowDirty.size} screens in this flow have unsaved changes. They will be lost when you switch screens.`
+        : codeEditorDirty ? "Unapplied JSON and other unsaved design changes will be lost." : "Unsaved design changes will be lost when you switch screens.",
       confirmLabel: "Discard and switch", danger: true,
     });
     if (!discard) {
@@ -1288,20 +1707,31 @@ async function loadDesign(designId, { discardConfirmed = false } = {}) {
     }
   }
   codeEditorDirty = false;
+  flowDirty.delete(designId);
+  for (const id of flowDirty) await fetchDesignLayout(id, { force: true });
+  flowDirty.clear();
   const response = await fetch(`/api/layout?design=${encodeURIComponent(designId)}`);
   const loaded = await response.json();
   if (!response.ok) throw new Error(loaded.error || "Could not load design");
   currentDesignId = designId;
+  editingDesignId = designId;
   layout = loaded.layout;
   appliedRevision = loaded.revision;
+  designLayouts.set(designId, layout);
+  designRevisions.set(designId, loaded.revision);
   selectedId = null;
   dirty = false;
   undoStack = [];
   redoStack = [];
-  if (canvasMode === "code") syncCodeEditor(true);
-  renderStudioControls();
-  renderAll();
-  await refreshPreview();
+  if (flowMode) {
+    flowStructureKey = "";
+    await rebuildFlow();
+  } else {
+    if (canvasMode === "code") syncCodeEditor(true);
+    renderStudioControls();
+    renderAll();
+    await refreshPreview();
+  }
   return true;
 }
 
@@ -1372,6 +1802,32 @@ async function updateStatus() {
 
 function applyZoom() {
   const zoom = ZOOM_LEVELS[zoomIndex];
+  if (flowMode && canvasMode === "edit") {
+    for (const card of document.querySelectorAll("#flow-canvas .flow-screen")) {
+      const designId = card.dataset.designId;
+      const stage = card.querySelector(".stage");
+      if (!stage) continue;
+      const [width, height] = designDims(designId);
+      const img = card.querySelector(".screen-preview");
+      const shell = card.querySelector(".device-shell");
+      stage.style.transform = `scale(${zoom})`;
+      stage.style.width = `${width}px`;
+      stage.style.height = `${height}px`;
+      if (img) {
+        img.width = width;
+        img.height = height;
+        img.style.width = `${width}px`;
+        img.style.height = `${height}px`;
+      }
+      shell.style.width = `${width * zoom}px`;
+      shell.style.height = `${height * zoom}px`;
+    }
+    $("zoom-label").textContent = `${Math.round(zoom * 100)}%`;
+    $("zoom-out").disabled = zoomIndex === 0;
+    $("zoom-in").disabled = zoomIndex === ZOOM_LEVELS.length - 1;
+    drawFlowArrows();
+    return;
+  }
   $("stage").style.transform = `scale(${zoom})`;
   const width = displayWidth();
   const height = displayHeight();
@@ -1450,6 +1906,13 @@ function bindEvents() {
   $("edit-mode").onclick = () => setCanvasMode("edit").catch((error) => toast(error.message, true));
   $("code-mode").onclick = () => setCanvasMode("code").catch((error) => toast(error.message, true));
   $("live-mode").onclick = () => setCanvasMode("live").catch((error) => toast(error.message, true));
+  $("show-connections").onclick = () => {
+    hideContextMenu();
+    setShowConnections(!flowMode).catch((error) => toast(error.message, true));
+  };
+  $("canvas-scroll").addEventListener("scroll", () => {
+    if (flowMode) drawFlowArrows();
+  });
   $("layout-json").oninput = () => {
     codeEditorDirty = true;
     showCodeErrors();
@@ -1483,7 +1946,9 @@ function bindEvents() {
     if (!event.target.closest("#canvas-menu")) hideContextMenu();
   });
   window.addEventListener("blur", hideContextMenu);
-  window.addEventListener("resize", hideContextMenu);
+  window.addEventListener("resize", () => {
+    if (flowMode) drawFlowArrows();
+  });
   $("screen-name").onchange = (event) => commit(() => { layout.name = event.target.value; });
   $("background").onchange = (event) => commit(() => { layout.background = event.target.value; });
   $("undo").onclick = undo;
@@ -1549,6 +2014,9 @@ async function initialize() {
     const loaded = await (await fetch(`/api/layout?design=${encodeURIComponent(currentDesignId)}`)).json();
     layout = loaded.layout;
     appliedRevision = loaded.revision;
+    editingDesignId = currentDesignId;
+    designLayouts.set(currentDesignId, layout);
+    designRevisions.set(currentDesignId, loaded.revision);
     bindEvents();
     applyZoom();
     renderStudioControls();

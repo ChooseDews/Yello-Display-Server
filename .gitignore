@@ -5,17 +5,26 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
 
 # Virtual environments
 .venv
-.env
-server/.env
-server/secrets.json
-server/studio.json
-server/layout.json
 
-# Captured screenshots
-snapshot_*.jpg
+# Server secrets / runtime state
+.env
+secrets.json
+studio.json
+data/
+
+# Logs
+*.log
+
+# Generated / archived outputs
+repomix-output.xml
+AppDir/
+history/
+
+# Images (screenshots, captures)
 *.jpg
 *.png
 
@@ -25,5 +34,8 @@ firmware/managed_components/
 firmware/sdkconfig
 firmware/sdkconfig.old
 
-# Runtime/container state
-data/
+# Rust build artifacts
+server-rs/target/
+
+# Benchmark outputs
+bench/results/
