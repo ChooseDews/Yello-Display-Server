@@ -88,6 +88,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
       - name: Build release binary
         run: cargo build --release --manifest-path server-rs/Cargo.toml
       - name: Package portable bundle
@@ -107,6 +110,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
       - name: Build release binary
         run: cargo build --release --manifest-path server-rs/Cargo.toml
       - name: Assemble AppDir
