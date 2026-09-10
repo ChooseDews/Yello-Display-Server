@@ -4,6 +4,7 @@
 [![Docker image](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/docker.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/docker.yml)
 [![Windows build](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/windows.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/windows.yml)
 [![Linux AppImage](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/linux.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/linux.yml)
+[![macOS build](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/macos.yml/badge.svg)](https://github.com/ChooseDews/Yello-Display-Server/actions/workflows/macos.yml)
 
 Turn a "Cheap Yellow Display" (ESP32-2432S028R, 2.8" ILI9341 touch screen) into
 a network-rendered touch dashboard. A Rust server owns layout, rendering, and
@@ -152,12 +153,12 @@ Each run archives a timestamped copy under `history/snapshots/`.
 
 ## Continuous integration
 
-Continuous integration is split into four workflows: server tests (shared via
+Continuous integration is split into workflows: server tests (shared via
 a reusable workflow), firmware flash artifacts, multi-architecture container
-images published to `ghcr.io/<owner>/<repository>`, plus a portable Windows
-bundle (`yello-server.exe` + static assets) and a Linux AppImage. Pushes run
-all of them; on `v*` tags the container is published and the Windows bundle and
-AppImage are attached to the GitHub release.
+images published to `ghcr.io/<owner>/<repository>`, plus portable builds for
+Windows (exe bundle), Linux (AppImage), and macOS (arm64 + x86_64). Pushes run
+all of them; on `v*` tags the container is published and the desktop bundles
+are attached to the GitHub release.
 
 See [AGENTS.md](AGENTS.md) for confirmed pin mappings, panel quirks, capture
 instructions, and the wire-protocol constraints.
