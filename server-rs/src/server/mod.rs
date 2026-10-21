@@ -58,10 +58,40 @@ pub fn wanted_image_sources(layout: &Value) -> HashSet<String> {
 fn in_flight_lock(set: &Arc<std::sync::Mutex<HashSet<String>>>) -> std::sync::MutexGuard<'_, HashSet<String>> {
     set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// Decode fetched image bytes into a cacheable RGB image. The header is
+/// inspected first so oversized images are rejected before the full
+/// (potentially huge) pixel buffer is allocated — same flow as PIL's
+/// `Image.open` + size check + `load()`.
+pub fn decode_image_bytes(bytes: &[u8]) -> Result<std::sync::Arc<RgbImage>, String> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let (w, h) = reader.into_dimensions().map_err(|e| e.to_string())?;
+    if (w as u64) * (h as u64) > MAX_IMAGE_PIXELS {
+        return Err("image dimensions are too large".to_string());
+    }
+    let decoded = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    Ok(std::sync::Arc::new(decoded.to_rgb8()))
+}
+
+/// Hosts (lowercased, comma-separated) exempted from the private-address
+/// SSRF block, e.g. a LAN Home Assistant serving camera snapshots.
+pub fn allowed_hosts_from_env() -> HashSet<String> {
+    std::env::var("YELLO_ALLOWED_HTTP_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
+}
 pub const FULL_RESYNC_INTERVAL_S: f64 = 300.0;
 pub const EXTERNAL_FETCH_TIMEOUT_S: u64 = 10;
 pub const DOT_LIFETIME_S: f64 = 4.0;
 pub const BUTTON_FLASH_S: f64 = 0.25;
+/// Minimum delay before re-fetching an image URL whose last attempt failed,
+/// so broken links don't hammer the remote host every 2 s loop tick.
+pub const IMAGE_FETCH_RETRY_S: u64 = 30;
 
 lazy_static::lazy_static! {
     static ref DEVICE_ID_RE: Regex = Regex::new(r"^[A-Za-z0-9._:-]{1,64}$").unwrap();
@@ -188,7 +218,7 @@ impl AppState {
             studio: Arc::new(RwLock::new(Studio::new(None))),
             devices: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
-            safe_http: Arc::new(SafeHttp::new()),
+            safe_http: Arc::new(SafeHttp::with_allowed_hosts(allowed_hosts_from_env())),
             external_values: Arc::new(RwLock::new(HashMap::new())),
             external_last_fetch: Arc::new(RwLock::new(HashMap::new())),
             images: Arc::new(RwLock::new(HashMap::new())),
@@ -626,6 +656,8 @@ pub fn start_background_tasks(state: Arc<AppState>) {
     let st_img = state.clone();
     tokio::spawn(async move {
         let in_flight: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let last_failure: Arc<std::sync::Mutex<HashMap<String, Instant>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let studio = st_img.studio.read().await.clone();
@@ -649,26 +681,31 @@ pub fn start_background_tasks(state: Arc<AppState>) {
             for url in wanted {
                 let skip = {
                     let cached = st_img.images.read().await.contains_key(&url);
-                    let inflight = in_flight.lock().unwrap().contains(&url);
-                    cached || inflight
+                    let inflight = in_flight_lock(&in_flight).contains(&url);
+                    let backed_off = last_failure
+                        .lock()
+                        .unwrap()
+                        .get(&url)
+                        .map(|t| t.elapsed().as_secs() < IMAGE_FETCH_RETRY_S)
+                        .unwrap_or(false);
+                    cached || inflight || backed_off
                 };
                 if skip { continue; }
-                in_flight.lock().unwrap().insert(url.clone());
+                in_flight_lock(&in_flight).insert(url.clone());
                 let client = st_img.safe_http.clone();
                 let img_map = st_img.images.clone();
                 let img_state = st_img.clone();
                 let inflight = in_flight.clone();
+                let failures = last_failure.clone();
                 tokio::spawn(async move {
                     let result = async {
                         let (bytes, _) = client.fetch_bytes(&url, MAX_IMAGE_BYTES).await.map_err(|e| e.to_string())?;
-                        let decoded = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-                        if (decoded.width() as u64) * (decoded.height() as u64) > MAX_IMAGE_PIXELS {
-                            return Err("image dimensions are too large".to_string());
-                        }
-                        Ok(std::sync::Arc::new(decoded.to_rgb8()))
+                        decode_image_bytes(&bytes)
                     }.await;
                     match result {
                         Ok(img) => {
+                            failures.lock().unwrap().remove(&url);
+                            in_flight_lock(&inflight).remove(&url);
                             img_map.write().await.insert(url.clone(), img);
                             // Python parity: re-push every design using this image.
                             let studio = img_state.studio.read().await;
@@ -683,6 +720,7 @@ pub fn start_background_tasks(state: Arc<AppState>) {
                         }
                         Err(e) => {
                             eprintln!("image fetch failed for {url}: {e}");
+                            failures.lock().unwrap().insert(url.clone(), Instant::now());
                             in_flight_lock(&inflight).remove(&url);
                         }
                     }

@@ -71,23 +71,31 @@ pub struct SafeHttp {
     allowed_hosts: HashSet<String>,
 }
 
+fn base_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    // Some image hosts (CDNs, Wikimedia, …) reject requests without a UA.
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        reqwest::header::HeaderValue::from_static(concat!("yello-server/", env!("CARGO_PKG_VERSION"))),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
+}
+
 impl SafeHttp {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            client: base_client(),
             allowed_hosts: HashSet::new(),
         }
     }
 
     pub fn with_allowed_hosts(hosts: HashSet<String>) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            client: base_client(),
             allowed_hosts: hosts.into_iter().map(|h| h.to_lowercase()).collect(),
         }
     }
