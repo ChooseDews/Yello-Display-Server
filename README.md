@@ -19,93 +19,70 @@ hit **Save & apply** to push them to every connected screen.
 |---|---|
 | ![Yello Studio designer](docs/studio_designer.png) | ![Running on the device](docs/device_photo.jpg) |
 
-## Quick start
+## Run the server
 
-1. **Start the server** (designs persist in `studio.json`, credentials in
-   `secrets.json` next to the working directory):
-
-   ```sh
-   cargo run --release --manifest-path server-rs/Cargo.toml
-   ```
-
-   or with Docker (state kept in the `yello-data` volume):
-
-   ```sh
-   docker compose up --build -d
-   ```
-
-2. **Flash the ESP32** (first-boot setup asks for Wi-Fi and the server
-   address on the touchscreen):
-
-   ```sh
-   cd firmware
-   . /home/john/esp/esp-idf/export.sh
-   sg dialout -c "idf.py -p /dev/ttyUSB0 flash"
-   ```
-
-3. **Design.** Open <http://127.0.0.1:8080/>, pick your screen, drag blocks,
-   and press **Save & apply**. The server listens on `8080` (browser UI) and
-   `8765` (device WebSocket) — configure paths/ports via `YELLO_STUDIO_PATH`,
-   `YELLO_SECRETS_PATH`, `YELLO_WEB_PORT`, and `YELLO_DEVICE_WS_PORT`.
-
-## Yello Studio
-
-The designer supports text, clocks, external text, buttons, screen buttons, images, color
-blocks, sandboxed scripts, Home Assistant sensor values, and Home Assistant entity toggles. Blocks
-can be selected, dragged, resized, reordered, hidden, locked,
-duplicated, aligned or deleted from a right-click menu, and edited with undo/redo.
-Designs can be portrait or landscape, and Live view sends browser touches through
-the same action path as the physical display. Connected screens appear in the header;
-each can be assigned its own reusable design. **Save & apply** persists the
-selected design in `studio.json` atomically and refreshes every connected screen
-assigned to it.
-
-A **Screen button** looks and behaves like a normal touch button but opens
-another saved design on the device that pressed it. Add a matching screen
-button on the destination design to build back, home, and multi-page menu
-flows. Navigation changes only the device's current screen; its assigned home
-design remains unchanged and is restored when it reconnects.
-
-The designer's **Code** mode exposes the complete normalized layout as JSON.
-JSON edits are schema-validated by the server before they are applied to the
-visual design, participate in undo/redo, and remain unsaved until **Save & apply**.
-Destructive confirmations and design-name entry use Yello Studio dialogs rather
-than native browser prompts.
-
-Configure Home Assistant from the dashboard Settings page to enable entity
-browsing, state polling, and touch-driven toggles. The token never leaves the
-server.
-
-Connected screen cards show rolling rendered FPS, changed pixels per second,
-wire bandwidth, 10-second heartbeat age, WiFi RSSI, and device uptime. Online
-devices can be restarted from the Devices page. Full-frame transfer uses a tuned 2 ms per-zone cadence
-instead of the original 10 ms, and high-volume per-zone firmware logs are
-disabled at the normal info level.
-
-## Benchmarks
-
-`bench/run_bench.py` drives fake ESP32 devices (speaking the real binary wire
-protocol) against the server and samples server CPU/RSS from `/proc`:
+The easiest way to run the server is the prebuilt container:
 
 ```sh
-uv run bench/run_bench.py
+docker pull ghcr.io/choosedews/yello-display-server:latest
+
+docker run -d --name yello \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -p 8765:8765 \
+  -v yello-data:/data \
+  ghcr.io/choosedews/yello-display-server:latest
 ```
 
-Raw JSON and server logs land in `bench/results/` (gitignored). The historic
-Python-vs-Rust methodology, results, and the concurrency fixes that came out of
-them are documented in [docs/server_benchmark.md](docs/server_benchmark.md).
+Then open <http://127.0.0.1:8080/> to design; flash your display and point it
+at the server (see [Connect a display](#connect-a-display)).
 
-## Test
+### Ports
+
+| Port | Purpose |
+|---|---|
+| `8080` | Yello Studio web UI (HTTP) |
+| `8765` | Device WebSocket gateway — the ESP32 connects here |
+
+### Config and persistent data
+
+All state lives under `/data` in the container. Mount a named volume (as
+above) or a host directory there:
 
 ```sh
-cargo test --manifest-path server-rs/Cargo.toml
+-v /opt/yello:/data
 ```
 
-## Build and flash firmware
+| Path inside `/data` | Contents | Env override |
+|---|---|---|
+| `studio.json` | Saved designs | `YELLO_STUDIO_PATH` |
+| `secrets.json` | Home Assistant credentials, entered from the Studio settings page | `YELLO_SECRETS_PATH` |
+
+Both files are created on first use, so an empty volume is fine. To pre-seed,
+place the files in the mounted directory before the first start. Mount a
+directory rather than individual files — the server saves by atomic rename.
+
+Ports can be changed with `YELLO_WEB_PORT` / `YELLO_DEVICE_WS_PORT`; the
+static web assets live at `YELLO_STATIC_DIR` (already set correctly in the
+image).
+
+### Docker Compose
+
+`compose.yaml` builds the image from source and runs it with the same
+ports and volume:
+
+```sh
+docker compose up --build -d
+```
+
+## Connect a display
+
+Flash the ESP32 (the user must be in the `dialout` group; the local path
+assumes ESP-IDF at `~/esp/esp-idf`):
 
 ```sh
 cd firmware
-. /home/john/esp/esp-idf/export.sh
+. ~/esp/esp-idf/export.sh
 idf.py build
 sg dialout -c "idf.py -p /dev/ttyUSB0 flash"
 ```
@@ -121,13 +98,58 @@ before networking starts. Tap a field and use the local keyboard to enter:
 - WebSocket port (normally `8765`)
 
 Tap **Save** to validate and persist the settings in ESP32 NVS. The password is
-masked, is never logged, and no longer needs to be compiled into firmware. To
-edit an existing configuration, reboot the device and hold the touchscreen for
-about one second while **HOLD SCREEN FOR SETUP** is displayed. **Cancel** keeps
-the previously saved configuration.
+masked and never logged. To edit an existing configuration, reboot the device
+and hold the touchscreen for about one second while **HOLD SCREEN FOR SETUP**
+is displayed. **Cancel** keeps the previously saved configuration.
 
-Build-time Kconfig values remain migration/factory defaults. A fresh repository
-build intentionally has an empty SSID, so a newly flashed device enters setup.
+A fresh repository build intentionally has an empty SSID, so a newly flashed
+device enters setup.
+
+## Yello Studio
+
+The designer supports text, clocks, external text, buttons, screen buttons,
+images, color blocks, sandboxed scripts, and Home Assistant sensor values and
+entity toggles. Blocks can be selected, dragged, resized, reordered, hidden,
+locked, duplicated, aligned, or deleted from a right-click menu, with
+undo/redo throughout. Designs can be portrait or landscape, and each connected
+screen can be assigned its own reusable design. **Save & apply** persists the
+selected design atomically and refreshes every connected screen assigned to it.
+
+A **Screen button** opens another saved design on the device that pressed it —
+add a matching button on the destination design to build back, home, and
+multi-page menu flows. The **Code** mode exposes the complete normalized
+layout as JSON, schema-validated by the server before it is applied.
+
+Configure Home Assistant from the dashboard Settings page to enable entity
+browsing, state polling, and touch-driven toggles. The token never leaves the
+server. Connected screen cards show rolling rendered FPS, changed pixels per
+second, wire bandwidth, heartbeat age, WiFi RSSI, and device uptime; online
+devices can be restarted from the Devices page.
+
+## Build from source
+
+```sh
+cargo build --release --manifest-path server-rs/Cargo.toml
+cargo test --manifest-path server-rs/Cargo.toml
+cargo run --release --manifest-path server-rs/Cargo.toml
+```
+
+Running from source, config files land next to the working directory
+(`studio.json` / `secrets.json`); override paths and ports with
+`YELLO_STUDIO_PATH`, `YELLO_SECRETS_PATH`, `YELLO_STATIC_DIR`,
+`YELLO_WEB_PORT`, and `YELLO_DEVICE_WS_PORT`.
+
+## Benchmarks
+
+`bench/run_bench.py` drives fake ESP32 devices (speaking the real binary wire
+protocol) against the server and samples server CPU/RSS from `/proc`:
+
+```sh
+uv run bench/run_bench.py
+```
+
+Raw JSON and server logs land in `bench/results/` (gitignored). Methodology
+and results are documented in [docs/server_benchmark.md](docs/server_benchmark.md).
 
 ## Repository layout
 
@@ -139,26 +161,13 @@ build intentionally has an empty SSID, so a newly flashed device enters setup.
 | `docs/` | Long-form write-ups (benchmark analysis, design demos) |
 | `capture_frame.py` | Webcam-based screenshot tool for the physical device |
 
-## Screenshot tool
-
-`capture_frame.py` photographs the display through a webcam and processes the
-frame into a clean screenshot (deskew, crop, orientation fix):
-
-```sh
-uv run capture_frame.py          # writes device_snapshot.jpg
-uv run capture_frame.py --raw -o raw.jpg   # unprocessed camera frame
-```
-
-Each run archives a timestamped copy under `history/snapshots/`.
-
 ## Continuous integration
 
-Continuous integration is split into workflows: server tests (shared via
-a reusable workflow), firmware flash artifacts, multi-architecture container
-images published to `ghcr.io/<owner>/<repository>`, plus portable builds for
-Windows (exe bundle), Linux (AppImage), and macOS (arm64 + x86_64). Pushes run
-all of them; on `v*` tags the container is published and the desktop bundles
-are attached to the GitHub release.
+CI is split into workflows: server tests, firmware flash artifacts,
+multi-architecture container images published to `ghcr.io/choosedews/yello-display-server`,
+plus portable builds for Windows (exe bundle), Linux (AppImage), and macOS
+(arm64 + x86_64). On `v*` tags the container is published and the desktop
+bundles are attached to the GitHub release.
 
 See [AGENTS.md](AGENTS.md) for confirmed pin mappings, panel quirks, capture
 instructions, and the wire-protocol constraints.
