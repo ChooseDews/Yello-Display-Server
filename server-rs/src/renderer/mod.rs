@@ -11,7 +11,27 @@ use crate::script_runtime::{execute_script, ScriptOutput};
 
 pub const DOT_RADIUS: i32 = 10;
 
-const FONT_PATH: &str = "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf";
+/// Liberation Sans Bold is bundled so text rendering never depends on the
+/// host's font packaging: a missing system font used to silently downgrade
+/// every text element to the 8x8 bitmap fallback, producing clipped,
+/// unstyled output. SIL OFL 1.1 permits bundling — see
+/// LICENSE-LiberationSans-Bold.txt. Override with YELLO_FONT_PATH to use a
+/// different font file (TTF/OTF); the bitmap fallback is kept only for
+/// unexpected decode failures.
+pub const FONT_PATH: &str = "renderer/LiberationSans-Bold.ttf";
+const BUNDLED_FONT_BYTES: &[u8] = include_bytes!("LiberationSans-Bold.ttf");
+
+fn load_font_bytes() -> Option<Vec<u8>> {
+    if let Ok(path) = std::env::var("YELLO_FONT_PATH") {
+        if !path.is_empty() {
+            match std::fs::read(&path) {
+                Ok(bytes) => return Some(bytes),
+                Err(e) => eprintln!("YELLO_FONT_PATH='{path}' unreadable ({e}); using bundled Liberation Sans Bold"),
+            }
+        }
+    }
+    Some(BUNDLED_FONT_BYTES.to_vec())
+}
 
 pub fn parse_color(val: &Value, default: (u8, u8, u8)) -> (u8, u8, u8) {
     if let Some(s) = val.as_str() {
@@ -202,7 +222,7 @@ fn draw_truetype_text(
     color: (u8, u8, u8),
     wrap: bool,
 ) -> Option<RgbaImage> {
-    let font_data = std::fs::read(FONT_PATH).ok()?;
+    let font_data = load_font_bytes()?;
     let font = FontRef::try_from_slice(&font_data).ok()?;
     let font = PxScaleFont {
         font,
@@ -218,12 +238,35 @@ fn draw_truetype_text(
     let ascent = font.ascent();
     let descent = font.descent();
     let line_height = ascent - descent + line_spacing;
-    let total_text_height = lines.len() as f32 * line_height - line_spacing;
-    let mut top_y = match vertical {
-        "top" => 1.0,
-        "bottom" => height as f32 - total_text_height - 1.0,
-        _ => ((height as f32) - total_text_height) / 2.0,
+
+    // Position the visible glyph ink rather than the line box: Liberation Sans'
+    // line box (ascent+descent) is ~24% taller than its actual ink, so line-box
+    // centering pushed descenders below the frame where they were clipped flat.
+    let ink_bounds: Vec<Option<(f32, f32)>> = lines.iter().map(|l| line_ink_bounds(&font, l)).collect();
+    let ink_top = ink_bounds.iter().find_map(|b| b.as_ref().map(|(min, _)| *min));
+    let ink_bottom = ink_bounds.iter().rev().find_map(|b| b.as_ref().map(|(_, max)| *max));
+
+    let mut cursor_y = match (ink_top, ink_bottom) {
+        (Some(top), Some(bottom)) => {
+            let ink_height = (lines.len().saturating_sub(1)) as f32 * line_height + bottom - top;
+            let top_ink_y = match vertical {
+                "top" => 1.0,
+                "bottom" => (height as f32) - ink_height - 1.0,
+                _ => ((height as f32) - ink_height) / 2.0,
+            };
+            top_ink_y - top
+        }
+        _ => {
+            let total_text_height = lines.len() as f32 * line_height - line_spacing;
+            let top_y = match vertical {
+                "top" => 1.0,
+                "bottom" => height as f32 - total_text_height - 1.0,
+                _ => ((height as f32) - total_text_height) / 2.0,
+            };
+            top_y + ascent
+        }
     };
+
     let color_rgba = Rgba([color.0, color.1, color.2, 255]);
     let mut layer = RgbaImage::new(width.max(1), height.max(1));
 
@@ -234,11 +277,27 @@ fn draw_truetype_text(
             "right" => (width as f32) - text_width - 2.0,
             _ => ((width as f32) - text_width) / 2.0,
         }.max(1.0);
-    let cursor_y = top_y + ascent;
         draw_line(&font, &mut layer, &line, cursor_x, cursor_y, color_rgba);
-        top_y += line_height;
+        cursor_y += line_height;
     }
     Some(layer)
+}
+
+/// Ink extent of a line relative to its baseline origin: (top, bottom) in image
+/// coordinates (top is negative, above the baseline). None when the line has no
+/// rasterizable glyphs.
+fn line_ink_bounds(font: &PxScaleFont<FontRef<'_>>, text: &str) -> Option<(f32, f32)> {
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for character in text.chars() {
+        let glyph = font.glyph_id(character).with_scale(font.scale());
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let bounds = outline.px_bounds();
+            min_y = min_y.min(bounds.min.y);
+            max_y = max_y.max(bounds.max.y);
+        }
+    }
+    (min_y <= max_y).then_some((min_y, max_y))
 }
 
 fn wrapped_lines(font: &PxScaleFont<FontRef<'_>>, text: &str, max_width: f32) -> Vec<String> {
@@ -288,7 +347,7 @@ fn draw_line(
                 if coverage <= 0.0 { return; }
                 let px = bounds_min.x + x as f32;
                 let py = bounds_min.y + y as f32;
-                if px < layer.width() as f32 && py < layer.height() as f32 {
+                if px >= 0.0 && py >= 0.0 && px < layer.width() as f32 && py < layer.height() as f32 {
                     let alpha = (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
                     let xi = px as u32;
                     let yi = py as u32;
