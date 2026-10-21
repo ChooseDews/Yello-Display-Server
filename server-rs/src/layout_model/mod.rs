@@ -362,6 +362,24 @@ pub fn migrate_layout(mut raw: Value) -> Value {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("element{}", index + 1));
 
+            // Schema-v1 elements carry their data in `frame`/`style`/`props`
+            // objects; legacy layouts use flat top-level keys (x, y, size,
+            // text, …). Without this guard, a modern layout posted without
+            // schemaVersion was rebuilt from defaults — silently turning
+            // every frame, style and prop (e.g. image src URLs) back to
+            // stock values and making the rendered output unrecognisable.
+            let modern_shape = old.get("frame").is_some()
+                || old.get("style").is_some()
+                || old.get("props").is_some();
+            if modern_shape {
+                let mut el = old.clone();
+                if raw_type != element_type {
+                    el["type"] = json!(element_type);
+                }
+                migrated["elements"].as_array_mut().unwrap().push(el);
+                continue;
+            }
+
             let mut el = match default_element(element_type, &element_id) {
                 Ok(v) => v,
                 Err(_) => continue,
