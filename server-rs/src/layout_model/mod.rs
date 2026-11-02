@@ -1042,7 +1042,12 @@ pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
     let is_v2 = raw.get("schemaVersion").and_then(|x| x.as_i64()) == Some(DESIGN_SCHEMA_VERSION as i64)
         || raw.get("pages").is_some();
     if !is_v2 {
-        return Ok(migrate_design_to_v2(validate_layout(raw)?));
+        // Migrate, then run the migrated document through the full v2
+        // checks: a legacy layout can still carry v2-only references
+        // (page: link targets, shared-element membership), and those must
+        // be rejected here rather than saved and ignored by devices.
+        let migrated = migrate_design_to_v2(validate_layout(raw)?);
+        return validate_design(migrated);
     }
 
     let mut v = Validator::new();

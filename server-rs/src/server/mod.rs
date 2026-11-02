@@ -1,5 +1,7 @@
 //! Main server: WebSocket gateway for ESP32 devices + REST API for web UI.
 
+pub mod mcp;
+
 use crate::frame_diff::dirty_regions;
 use crate::home_assistant::HaClient;
 use crate::layout_model::*;
@@ -1391,6 +1393,12 @@ pub async fn handle_http_request(
                 "application/octet-stream"
             };
             serve_static_file(&file_path, content_type).await
+        }
+        (Method::POST, "/mcp") => {
+            mcp::handle_mcp_request(state.clone(), req).await
+        }
+        (Method::GET, "/mcp") => {
+            json_response(StatusCode::METHOD_NOT_ALLOWED, &json!({"error": "MCP is POST-only (Streamable HTTP)"}))
         }
         (Method::GET, "/api/layout") => {
             let studio = state.studio.read().await;
