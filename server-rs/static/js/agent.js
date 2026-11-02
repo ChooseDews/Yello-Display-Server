@@ -17,6 +17,11 @@ import { saveChat, listChats, getChat, deleteChat } from "./chatstore.js";
 
 const KEY_STORAGE = "yello-openrouter-key";
 const MODEL_STORAGE = "yello-openrouter-model";
+/** Which conversation is "current" across reloads: a chat id, or "new"
+ *  after Clear (a fresh conversation must stay fresh after a reload
+ *  instead of resurrecting the previous chat). */
+const ACTIVE_CHAT_KEY = "yello-agent-active-chat";
+let chatEpoch = 0;
 // Any OpenAI-compatible endpoint works; override via localStorage
 // "yello-openrouter-base" (used by the smoke tests with a mock server).
 const API_BASE = localStorage.getItem("yello-openrouter-base") || "https://openrouter.ai/api/v1";
@@ -136,18 +141,68 @@ const SYSTEM_PROMPT = `You are the agent built into Yello Studio, a designer for
 - actions: [{ id, name, type: "http", method: "GET"|"POST", url, body }] — fired by button elements (props.actionId) when tapped on the device.
 
 ## Script language (script elements)
-A bounded, Python-like language evaluated by the server on each refresh. Indentation-based blocks, if/elif/else, for x in range(n), comparisons, and/or/not, arithmetic, f-strings (f"Temp {value:.1f}"). Variables width and height are the element's frame size in px. Output: call text(s) to set the element's text, or draw (drawing replaces the text output). Built-ins:
-- ha("sensor.x") -> the entity's state (string or number); ha("sensor.x", "battery_level") -> an attribute. Missing/error entities give "unavailable" / "unknown", so guard with number(ha(...), fallback).
-- now("%H:%M") -> local time string (strftime).
-- number(x, default), clamp(x, lo, hi), min, max, abs, round, sqrt, sin, cos, tan.
-- clear("#112233") fill background; rect(x, y, w, h, color, radius); circle(cx, cy, r, color); line(x0, y0, x1, y1, color, width); label(x, y, text, color, size, anchor) where anchor is two letters like "mm" (middle-middle), "la" (left-top) — first letter l/m/r = horizontal, second a/m/d = top/middle/baseline.
-Limits: small programs only (a few hundred nodes, bounded loops). Examples:
+A small, bounded, Python-like language. The server re-runs the script on every refresh of the element (props.refreshInterval seconds). Code is capped at 8000 characters and about 3000 operations per run, so keep loops short. A script error renders in the element itself, in red, as "Script: <message>" — write carefully, there is no console.
+
+Values and variables:
+- Numbers (floats), strings ("..." or '...'), and the booleans True / False. Assign with name = expression; there are no declarations and no lists/dicts/functions of your own.
+- width and height are preset to the element's frame size in px — lay out relative to them, never hardcode a page size.
+- Operators: + - * / % ** and comparisons == != < <= > >=, plus and / or / not. + between two strings concatenates them; any other arithmetic on strings is an error. Division is float division.
+- f-strings: f"Temp {value:.1f}" — {expr} inserts a value, {expr:.Nf} formats with N decimals, {expr:.N%} formats as a percentage (value * 100 with N decimals and a % sign). In design JSON the code is a JSON string: use double quotes for f-strings and single quotes inside them.
+
+Statements:
+- One statement per line; blocks are indented (spaces) after a line ending with ':'.
+- if cond: / else: — there is NO elif; nest an if inside the else block instead.
+- for x in range(n), range(a, b), or range(a, b, step): — the only loop form; the body is the indented block.
+- # starts a comment to end of line.
+
+Output — exactly one of two modes per script:
+- Text mode: call text(s) and draw nothing. The string renders with the element's style (fontSize, color, align) and the wrap prop applies.
+- Drawing mode: if the script calls any drawing built-in, the drawing IS the output (text() is ignored). The canvas is exactly the element's frame: origin at its top-left corner, x grows right, y grows down, units are px. Anything drawn outside the frame is clipped.
+
+Built-in functions:
+- ha("sensor.x") -> the entity's state (string, or number when the state is numeric). ha("sensor.x", "attribute") -> an attribute value. Missing or errored entities return the string "unavailable"; a missing attribute returns "unknown" — always guard numeric use: number(ha("sensor.x"), fallback).
+- now("%H:%M") -> the local time formatted with strftime codes (default "%H:%M").
+- number(x, default = 0) -> x as a number, or default when x is not numeric.
+- clamp(x, lo, hi); min(a, b, ...); max(a, b, ...); abs(x); round(x) or round(x, digits); sqrt(x); sin(x), cos(x), tan(x) (radians).
+- text(s) -> set the text-mode output (see above).
+- clear("#rrggbb") -> fill the whole frame with a color. Colors are always "#rrggbb" strings.
+- rect(x, y, w, h, color, radius = 0) -> filled rectangle (radius rounds the corners).
+- circle(cx, cy, r, color) -> filled circle.
+- line(x0, y0, x1, y1, color, width = 1) -> straight line.
+- label(x, y, text, color = "#ffffff", size = 16, anchor = "la") -> draw text on the canvas. label uses a fixed bitmap font: every character cell is a square of G px, where G = 8 * round(size / 8) — sizes 4-11 give G = 8, 12-19 give 16, 20-27 give 24. EVERY character (digits, spaces, symbols) is exactly G px wide, so a string of N characters is N * G px wide — use that to position and center text exactly. anchor is two letters: horizontal l (x is the left edge) / c or m (x is the center) / r (x is the right edge); vertical a (y is the top) / m (y is the middle) / b (y is the bottom edge). Example anchors: "la" top-left, "mm" centered, "rb" bottom-right.
+
+Examples (complete scripts):
+Battery bar (drawing mode):
   value = number(ha("sensor.battery_level"), 72)
   clear("#18202b")
   rect(4, 4, width - 8, height - 8, "#273447", 6)
   rect(8, 8, (width - 16) * clamp(value, 0, 100) / 100, height - 16, "#f2c94c", 4)
   label(width / 2, height / 2, f"{value:.0f}%", "#ffffff", 14, "mm")
-And: text(f"Office {ha('sensor.office_temperature')}°C") — note: use double quotes for the f-string and single quotes inside, JSON-escaped in the document.
+Door state (if/else, color changes with state):
+  state = ha("binary_sensor.front_door")
+  if state == "on":
+      clear("#9b2c3b")
+      label(width / 2, height / 2, "DOOR OPEN", "#ffffff", 15, "mm")
+  else:
+      clear("#1f7a4d")
+      label(width / 2, height / 2, "Door closed", "#ffffff", 15, "mm")
+Temperature readout (text mode — the element's own style does the layout):
+  temp = number(ha("sensor.office_temperature"), 0)
+  if temp == 0:
+      text("Office temp unavailable")
+  else:
+      text(f"Office {temp:.1f}°C")
+Sparkline (loop + line + a small label; size 11 = 8px glyphs, so the 5-char clock is 40px wide):
+  clear("#121826")
+  last_x = 0
+  last_y = height / 2
+  for point in range(1, 13):
+      x = point * width / 12
+      y = height / 2 + sin(point * 0.9) * height * 0.3
+      line(last_x, last_y, x, y, "#6b9cff", 2)
+      last_x = x
+      last_y = y
+  label(5, 5, now("%H:%M"), "#f2c94c", 11, "la")
 
 ## Home Assistant
 HA elements and ha() read live entity states from the user's connected Home Assistant; the current entity list (id = state) is included in the context message when HA is connected. Only use entity ids from that list or already present in the design; never invent entity ids. ha-toggle works for entities in domains like light, switch, fan, cover, climate (anything with on/off).
@@ -466,6 +521,7 @@ function markdownLite(text) {
 function addMessage(role, text = "") {
   // Never render an empty assistant bubble.
   if (role === "assistant" && !text.trim()) return null;
+  closeToolGroup();
   const box = $("agent-messages");
   const el = document.createElement("div");
   el.className = `msg ${role}`;
@@ -528,15 +584,42 @@ function makeJsonBlock() {
   };
 }
 
-// One tool call in the transcript: a one-line chip normally; in dev mode
-// the arguments and result JSON show underneath it.
+// Consecutive tool calls share one group: their chips sit side by side in
+// a wrapping row, with the dev-mode JSON bodies stacked underneath. Any
+// other transcript content closes the group.
+let openToolGroup = null;
+
+function closeToolGroup() {
+  openToolGroup = null;
+}
+
+function currentToolGroup(box) {
+  if (openToolGroup && openToolGroup.group.isConnected && box.lastElementChild === openToolGroup.group) {
+    return openToolGroup;
+  }
+  const group = document.createElement("div");
+  group.className = "tool-group";
+  const chips = document.createElement("div");
+  chips.className = "tool-chips";
+  const bodies = document.createElement("div");
+  bodies.className = "tool-bodies";
+  group.append(chips, bodies);
+  box.append(group);
+  openToolGroup = { group, chips, bodies };
+  return openToolGroup;
+}
+
+// One tool call in the transcript: a chip in the current group's chip row;
+// in dev mode the arguments and result JSON show in the group's bodies.
 function addToolEntry(name, argsJson) {
   const box = $("agent-messages");
-  const wrap = document.createElement("div");
-  wrap.className = "tool-entry";
+  const group = currentToolGroup(box);
   const chip = document.createElement("div");
   chip.className = "tool-chip";
   chip.textContent = `… ${name}`;
+  group.chips.append(chip);
+  const body = document.createElement("div");
+  body.className = "tool-body";
   const args = makeJsonBlock();
   let parsedArgs = argsJson || "{}";
   try {
@@ -544,20 +627,21 @@ function addToolEntry(name, argsJson) {
   } catch { /* keep raw */ }
   args.set(parsedArgs);
   const result = makeJsonBlock();
-  wrap.append(chip, args.wrap, result.wrap);
-  box.append(wrap);
+  body.append(args.wrap, result.wrap);
+  group.bodies.append(body);
   box.scrollTop = box.scrollHeight;
   return {
     finish(resultObj, ok, imageUrl) {
       chip.textContent = `${ok ? "✓" : "✕"} ${name}`;
-      wrap.classList.add(ok ? "tool-ok" : "tool-fail");
+      chip.classList.add(ok ? "tool-ok" : "tool-fail");
+      if (!ok) body.classList.add("tool-fail");
       result.set(resultObj);
       if (imageUrl) {
         const img = document.createElement("img");
         img.className = "tool-thumb";
         img.src = imageUrl;
         img.alt = "Rendered screen view";
-        wrap.append(img);
+        body.append(img);
         box.scrollTop = box.scrollHeight;
       }
     },
@@ -569,6 +653,7 @@ function addToolEntry(name, argsJson) {
 // has text — tool-only and thinking-only rounds must not leave an empty
 // assistant pill behind. setContent("") removes it again.
 function addAssistantTurn() {
+  closeToolGroup();
   const box = $("agent-messages");
   const row = document.createElement("div");
   row.className = "msg-row";
@@ -771,16 +856,19 @@ function setModelDropdown(open) {
 function updateProviderUi() {
   const hasKey = Boolean(apiKey());
   const connected = hasKey && modelsLoadOk;
-  $("agent-provider-dot").classList.toggle("connected", connected);
-  const status = $("agent-provider-status");
-  status.textContent = connected ? "Connected" : hasKey ? "Key saved" : "Not connected";
-  status.classList.toggle("connected", connected);
+  // The connection status lives in the top bar, next to the Agent nav.
+  const statusText = connected ? "Connected" : hasKey ? "Key saved" : "Not connected";
+  $("agent-topbar-dot").classList.toggle("connected", connected);
+  const topText = $("agent-topbar-text");
+  const baseHost = API_BASE.replace(/^https?:\/\//, "").split("/")[0];
+  const providerName = baseHost.includes("openrouter") ? "OpenRouter" : baseHost;
+  topText.textContent = `${providerName} · ${statusText}`;
+  topText.classList.toggle("connected", connected);
   $("agent-key-state").textContent = hasKey ? "Key saved in this browser" : "No key saved";
   const open = setupOpen || !connected;
   $("agent-setup-body").style.display = open ? "" : "none";
   $("agent-settings-toggle").setAttribute("aria-expanded", String(open));
-  const baseHost = API_BASE.replace(/^https?:\/\//, "").split("/")[0];
-  $("agent-provider-name").textContent = baseHost.includes("openrouter") ? "OpenRouter" : baseHost;
+  $("agent-provider-name").textContent = providerName;
 }
 
 async function loadModels() {
@@ -947,6 +1035,7 @@ function persistChat() {
     currentChatId = `chat-${now}-${Math.random().toString(36).slice(2, 8)}`;
     currentChatCreatedAt = now;
   }
+  localStorage.setItem(ACTIVE_CHAT_KEY, currentChatId);
   saveChat({
     id: currentChatId,
     title: chatTitle(),
@@ -961,6 +1050,12 @@ function persistChat() {
 }
 
 function startNewChat() {
+  // Clear really starts a new conversation: stop any in-flight reply,
+  // invalidate its pending persist, and remember that the fresh chat is
+  // the current one so a reload does not resurrect the previous chat.
+  chatEpoch += 1;
+  if (aborter) aborter.abort();
+  localStorage.setItem(ACTIVE_CHAT_KEY, "new");
   conversation.length = 0;
   currentChatId = null;
   currentChatCreatedAt = 0;
@@ -974,6 +1069,7 @@ function startNewChat() {
 
 /** Rebuild the chat DOM from a stored message list. */
 function renderConversationDom() {
+  closeToolGroup();
   const box = $("agent-messages");
   box.replaceChildren();
   for (let i = 0; i < conversation.length; i += 1) {
@@ -982,6 +1078,7 @@ function renderConversationDom() {
     if (message.role === "user" && typeof message.content === "string") {
       addMessage("user", message.content);
     } else if (message.role === "user" && Array.isArray(message.content)) {
+      closeToolGroup();
       const caption = message.content.find((p) => p.type === "text")?.text || "Rendered view:";
       const image = message.content.find((p) => p.type === "image_url")?.image_url?.url;
       const row = document.createElement("div");
@@ -1025,6 +1122,7 @@ function renderConversationDom() {
 }
 
 function loadChat(record) {
+  localStorage.setItem(ACTIVE_CHAT_KEY, record.id);
   conversation.length = 0;
   for (const message of record.messages || []) conversation.push(message);
   currentChatId = record.id;
@@ -1038,7 +1136,19 @@ function loadChat(record) {
 }
 
 async function restoreLastChat() {
+  const active = localStorage.getItem(ACTIVE_CHAT_KEY);
+  if (active === "new") {
+    greet();
+    return;
+  }
   try {
+    if (active) {
+      const record = await getChat(active);
+      if (record && (record.messages || []).length) {
+        loadChat(record);
+        return;
+      }
+    }
     const chats = await listChats();
     if (chats.length) {
       const record = await getChat(chats[0].id);
@@ -1168,6 +1278,7 @@ async function sendAgentMessage() {
   localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
   input.value = "";
   input.style.height = "auto";
+  const epoch = chatEpoch;
   sending = true;
   $("agent-send").disabled = true;
   $("agent-stop").classList.remove("hidden");
@@ -1236,9 +1347,11 @@ async function sendAgentMessage() {
         }
       }
     }
-    persistChat();
+    // A Clear mid-flight starts a new conversation: this send's history
+    // belongs to the old one and must not be persisted over it.
+    if (epoch === chatEpoch) persistChat();
   } catch (error) {
-    if (error.name !== "AbortError") addMessage("assistant", `⚠ ${error.message}`);
+    if (error.name !== "AbortError" && epoch === chatEpoch) addMessage("assistant", `⚠ ${error.message}`);
   } finally {
     sending = false;
     $("agent-send").disabled = false;

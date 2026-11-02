@@ -13,6 +13,8 @@ import { rebuildFlow } from "./flow.js";
 import { setDocumentState } from "./history.js";
 import { initAgentPage, tryDockAgent, placeAgent } from "./agent.js";
 
+export { initAgentPage };
+
 export function pageFromPath() {
   const name = window.location.pathname.replace(/^\//, "");
   return ["designer", "devices", "designs", "settings", "about", "agent"].includes(name) ? name : "designer";

@@ -16,6 +16,7 @@ import { setShowConnections, drawFlowArrows } from "./flow.js";
 import {
   pageFromPath, showPage, renderStudioControls, renderHomeAssistantOptions, renderDesignPage,
   selectScreen, loadDesign, assignDesign, createDesign, saveLayout, saveHomeAssistantSettings, startHomeAssistantOAuth, updateStatus,
+  initAgentPage,
 } from "./views.js?v=3";
 
 function handleKeyboard(event) {
@@ -304,6 +305,9 @@ Workflow: first list my designs and screens so you know what exists. Before savi
     renderStudioControls();
     renderAll();
     showPage(pageFromPath());
+    // Load the agent's provider state at boot so the top-bar OpenRouter
+    // status is live before the Agent page/panel is ever opened.
+    initAgentPage();
     await Promise.all([refreshPreview(), updateStatus()]);
     setInterval(updateStatus, 3000);
     setInterval(() => {

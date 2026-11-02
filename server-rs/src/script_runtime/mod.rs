@@ -673,10 +673,8 @@ impl<'a> Runtime<'a> {
     }
 
     fn draw_label(&mut self, x: i32, y: i32, text: &str, col: Rgba<u8>, font_size: u32, align: &str) {
-        let scale = (font_size as f32 / 8.0).max(1.0).round() as u32;
-        let char_w = 6 * scale;
+        let (scale, text_w) = label_metrics(text, font_size);
         let char_h = 8 * scale;
-        let text_w = text.len() as u32 * char_w;
 
         let start_x = match align.chars().next().unwrap_or('l') {
             'c' | 'm' => x - (text_w as i32) / 2,
@@ -692,6 +690,18 @@ impl<'a> Runtime<'a> {
 
         crate::renderer::draw_bitmap_text(&mut self.image, start_x, start_y, text, col, scale);
     }
+}
+
+/// Bitmap-font metrics for label(): the glyph cell is 8x8 and
+/// draw_bitmap_text advances 8 * scale px per character, so the measured
+/// text width must use the same 8px advance. (This used to measure 6px per
+/// char, which pushed centered and right-anchored labels 25% too far right
+/// and cut their text off at the block edge.) Width counts characters, not
+/// UTF-8 bytes.
+pub fn label_metrics(text: &str, font_size: u32) -> (u32, u32) {
+    let scale = (font_size as f32 / 8.0).max(1.0).round() as u32;
+    let text_w = text.chars().count() as u32 * 8 * scale;
+    (scale, text_w)
 }
 
 pub fn eval_fstring(raw: &str, runtime: &mut Runtime) -> Result<String, ScriptError> {
@@ -1098,6 +1108,34 @@ mod tests {
             let out = execute_script(ex.code, 200, 60, &context).unwrap();
             assert!(out.text.is_some() || out.image.is_some());
         }
+    }
+
+    #[test]
+    #[test]
+    fn test_label_metrics_match_glyph_advance() {
+        // 4 chars at size 8 (scale 1) advance 8px each = 32px wide.
+        assert_eq!(label_metrics("MMMM", 8), (1, 32));
+        // Size 14 snaps to scale 2; width counts chars, not UTF-8 bytes
+        // ("°C" is 2 chars but 3 bytes).
+        assert_eq!(label_metrics("21°C", 14), (2, 64));
+    }
+
+    #[test]
+    fn test_centered_label_stays_inside_block() {
+        // A centered label as wide as the block must start at x=0 and keep
+        // its ink inside the canvas (regression: the 6px/char measurement
+        // shifted it right and clipped the end).
+        let ctx = json!({});
+        let out = execute_script("label(16, 0, \"MMMM\", \"#ffffff\", 8, \"ma\")", 32, 8, &ctx).unwrap();
+        let image = out.image.expect("label draws an image");
+        let mut max_x = 0;
+        for (x, _y, pixel) in image.enumerate_pixels() {
+            if pixel[3] > 0 {
+                max_x = max_x.max(x);
+            }
+        }
+        assert!(max_x < 32, "ink must stay inside the 32px block, got max_x={max_x}");
+        assert!(max_x >= 24, "the full 4-char label should render, got max_x={max_x}");
     }
 
     #[test]

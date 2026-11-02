@@ -26,13 +26,16 @@
         <button id="redo" class="icon-button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo"><svg class="ic" aria-hidden="true"><use href="#i-redo"></use></svg></button>
         <button id="save" class="primary-button"><span class="save-icon" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-save"></use></svg></span><span class="save-label">Save &amp; apply</span></button>
       </div>
+      <div class="topbar-agent">
+        <span id="agent-topbar-status" class="agent-topbar-status" title="OpenRouter connection status"><span id="agent-topbar-dot" class="status-dot"></span><span id="agent-topbar-text">OpenRouter</span></span>
+        <button type="button" id="agent-topbar-toggle" class="icon-button agent-topbar-toggle" data-route="agent" title="Agent — chat panel" aria-label="Toggle the Agent panel"><svg class="ic" aria-hidden="true"><use href="#i-bot"></use></svg></button>
+      </div>
     </div>
     <div class="sub-bar">
       <nav class="main-nav" aria-label="Studio navigation">
         <a href="/designer" data-route="designer">Designer</a>
         <a href="/devices" data-route="devices">Devices</a>
         <a href="/designs" data-route="designs">Screen designs</a>
-        <a href="/agent" data-route="agent">Agent</a>
         <a href="/settings" data-route="settings">Settings</a>
         <a href="/about" data-route="about">About</a>
       </nav>
@@ -275,9 +278,7 @@
     <section class="settings-card" id="agent-setup-card">
       <div class="agent-provider-bar">
         <span class="agent-provider-id">
-          <span id="agent-provider-dot" class="status-dot"></span>
           <strong id="agent-provider-name">OpenRouter</strong>
-          <span id="agent-provider-status" class="agent-provider-status">Not connected</span>
         </span>
         <button id="agent-settings-toggle" type="button" class="icon-button" title="Provider settings" aria-label="Provider settings" aria-expanded="true" aria-controls="agent-setup-body"><svg class="ic" aria-hidden="true"><use href="#i-gear"></use></svg></button>
       </div>
