@@ -47,6 +47,54 @@ fn font_ref() -> Option<FontRef<'static>> {
     .clone()
 }
 
+/// Monochrome emoji fallback: a subset of Noto Emoji (SIL OFL 1.1 — see
+/// NotoEmoji-LICENSE.txt), built with fontTools from Google's static
+/// NotoEmoji-Regular: symbol/emoji ranges only (U+2000–2BFF, U+1F000–1FAFF,
+/// keycaps, regional indicators, tag chars), hinting and vertical/layout
+/// tables dropped — 784 KB against the color font's ~10 MB. Characters use
+/// it only when Liberation Sans has no glyph for them, so existing text
+/// renders identically and emoji/symbols (🔥 ⚠ ✅ 🌡) appear as monochrome
+/// glyphs in the text color.
+const EMOJI_FONT_BYTES: &[u8] = include_bytes!("NotoEmoji.ttf");
+
+fn emoji_font_ref() -> Option<FontRef<'static>> {
+    static FONT: std::sync::OnceLock<Option<FontRef<'static>>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| FontRef::try_from_slice(EMOJI_FONT_BYTES).ok()).clone()
+}
+
+/// The fonts a text box can draw with: the primary face plus the emoji
+/// fallback. ab_glyph performs no shaping, so characters resolve one at a
+/// time — ZWJ sequences and skin-tone modifiers are not joined; their
+/// parts simply render side by side.
+struct TextFonts {
+    main: PxScaleFont<FontRef<'static>>,
+    emoji: Option<PxScaleFont<FontRef<'static>>>,
+}
+
+impl TextFonts {
+    fn at_size(font_size: u32) -> Option<TextFonts> {
+        let scale = PxScale::from(font_size as f32);
+        Some(TextFonts {
+            main: PxScaleFont { font: font_ref()?, scale },
+            emoji: emoji_font_ref().map(|font| PxScaleFont { font, scale }),
+        })
+    }
+
+    /// The font that has a glyph for `ch`: primary first, emoji fallback
+    /// second, primary again (for its .notdef) when neither has one.
+    fn font_for(&self, ch: char) -> &PxScaleFont<FontRef<'static>> {
+        if self.main.glyph_id(ch).0 != 0 {
+            return &self.main;
+        }
+        if let Some(emoji) = &self.emoji {
+            if emoji.glyph_id(ch).0 != 0 {
+                return emoji;
+            }
+        }
+        &self.main
+    }
+}
+
 pub fn parse_color(val: &Value, default: (u8, u8, u8)) -> (u8, u8, u8) {
     if let Some(s) = val.as_str() {
         let s = s.trim_start_matches('#');
@@ -236,14 +284,11 @@ fn draw_truetype_text(
     color: (u8, u8, u8),
     wrap: bool,
 ) -> Option<RgbaImage> {
-    let font = font_ref()?;
-    let font = PxScaleFont {
-        font,
-        scale: PxScale::from(font_size as f32),
-    };
+    let fonts = TextFonts::at_size(font_size)?;
+    let font = &fonts.main;
     let max_text_width = (width.saturating_sub(4)) as f32;
     let lines: Vec<String> = if wrap {
-        wrapped_lines(&font, text, max_text_width)
+        wrapped_lines(&fonts, text, max_text_width)
     } else {
         text.lines().map(|s| s.to_string()).collect()
     };
@@ -255,7 +300,7 @@ fn draw_truetype_text(
     // Position the visible glyph ink rather than the line box: Liberation Sans'
     // line box (ascent+descent) is ~24% taller than its actual ink, so line-box
     // centering pushed descenders below the frame where they were clipped flat.
-    let ink_bounds: Vec<Option<(f32, f32)>> = lines.iter().map(|l| line_ink_bounds(&font, l)).collect();
+    let ink_bounds: Vec<Option<(f32, f32)>> = lines.iter().map(|l| line_ink_bounds(&fonts, l)).collect();
     let ink_top = ink_bounds.iter().find_map(|b| b.as_ref().map(|(min, _)| *min));
     let ink_bottom = ink_bounds.iter().rev().find_map(|b| b.as_ref().map(|(_, max)| *max));
 
@@ -284,13 +329,13 @@ fn draw_truetype_text(
     let mut layer = RgbaImage::new(width.max(1), height.max(1));
 
     for line in lines {
-        let text_width = measure_text(&font, &line);
+        let text_width = measure_text(&fonts, &line);
         let cursor_x = match align {
             "left" => 2.0,
             "right" => (width as f32) - text_width - 2.0,
             _ => ((width as f32) - text_width) / 2.0,
         }.max(1.0);
-        draw_line(&font, &mut layer, &line, cursor_x, cursor_y, color_rgba);
+        draw_line(&fonts, &mut layer, &line, cursor_x, cursor_y, color_rgba);
         cursor_y += line_height;
     }
     Some(layer)
@@ -299,10 +344,11 @@ fn draw_truetype_text(
 /// Ink extent of a line relative to its baseline origin: (top, bottom) in image
 /// coordinates (top is negative, above the baseline). None when the line has no
 /// rasterizable glyphs.
-fn line_ink_bounds(font: &PxScaleFont<FontRef<'_>>, text: &str) -> Option<(f32, f32)> {
+fn line_ink_bounds(fonts: &TextFonts, text: &str) -> Option<(f32, f32)> {
     let mut min_y = f32::INFINITY;
     let mut max_y = f32::NEG_INFINITY;
     for character in text.chars() {
+        let font = fonts.font_for(character);
         let glyph = font.glyph_id(character).with_scale(font.scale());
         if let Some(outline) = font.outline_glyph(glyph) {
             let bounds = outline.px_bounds();
@@ -313,7 +359,7 @@ fn line_ink_bounds(font: &PxScaleFont<FontRef<'_>>, text: &str) -> Option<(f32, 
     (min_y <= max_y).then_some((min_y, max_y))
 }
 
-fn wrapped_lines(font: &PxScaleFont<FontRef<'_>>, text: &str, max_width: f32) -> Vec<String> {
+fn wrapped_lines(fonts: &TextFonts, text: &str, max_width: f32) -> Vec<String> {
     let mut lines = Vec::new();
     for paragraph in text.lines() {
         let mut current = String::new();
@@ -323,7 +369,7 @@ fn wrapped_lines(font: &PxScaleFont<FontRef<'_>>, text: &str, max_width: f32) ->
             } else {
                 format!("{current} {word}")
             };
-            if !current.is_empty() && measure_text(font, &candidate) > max_width {
+            if !current.is_empty() && measure_text(fonts, &candidate) > max_width {
                 lines.push(current);
                 current = word.to_string();
             } else {
@@ -338,12 +384,17 @@ fn wrapped_lines(font: &PxScaleFont<FontRef<'_>>, text: &str, max_width: f32) ->
     lines
 }
 
-fn measure_text(font: &PxScaleFont<FontRef<'_>>, text: &str) -> f32 {
-    text.chars().map(|c| font.h_advance(font.glyph_id(c))).sum()
+fn measure_text(fonts: &TextFonts, text: &str) -> f32 {
+    text.chars()
+        .map(|c| {
+            let font = fonts.font_for(c);
+            font.h_advance(font.glyph_id(c))
+        })
+        .sum()
 }
 
 fn draw_line(
-    font: &PxScaleFont<FontRef<'_>>,
+    fonts: &TextFonts,
     layer: &mut RgbaImage,
     text: &str,
     start_x: f32,
@@ -352,6 +403,7 @@ fn draw_line(
 ) {
     let mut cursor = point(start_x, start_y);
     for character in text.chars() {
+        let font = fonts.font_for(character);
         let glyph: Glyph = font.glyph_id(character).with_scale_and_position(font.scale(), cursor);
         let advance = font.h_advance(glyph.id);
         if let Some(outline) = font.outline_glyph(glyph) {
@@ -953,5 +1005,36 @@ pub fn has_clock(layout: &Value) -> bool {
         })
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ink(img: &RgbaImage) -> usize {
+        img.pixels().filter(|p| p[3] > 0).count()
+    }
+
+    #[test]
+    fn emoji_renders_via_fallback_font() {
+        // U+1F525 (fire) has no Liberation Sans glyph; the Noto Emoji
+        // fallback must produce substantial ink, far more than an empty
+        // .notdef box would.
+        let img = draw_truetype_text(64, 64, "\u{1F525}", 48, "center", "middle", (255, 255, 255), false)
+            .expect("truetype render");
+        let filled = ink(&img);
+        assert!(filled > 200, "emoji should render real ink, got {filled}");
+    }
+
+    #[test]
+    fn fallback_font_resolution() {
+        let fonts = TextFonts::at_size(20).expect("fonts");
+        assert!(std::ptr::eq(fonts.font_for('A'), &fonts.main), "plain text stays on the primary font");
+        let emoji = fonts.emoji.as_ref().expect("emoji font bundled");
+        assert!(std::ptr::eq(fonts.font_for('\u{1F525}'), emoji), "emoji resolves to the fallback");
+        let plain = measure_text(&fonts, "Temp");
+        let with_emoji = measure_text(&fonts, "Temp \u{1F525}");
+        assert!(with_emoji > plain + 15.0, "emoji advance should be ~1em at 20px: {plain} vs {with_emoji}");
     }
 }

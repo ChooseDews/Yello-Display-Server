@@ -132,6 +132,7 @@ const SYSTEM_PROMPT = `You are the agent built into Yello Studio, a designer for
 - Element: { id (unique slug), type, name, frame: {x, y, w, h} in page pixels, style: {...}, props: {...}, visible: true, locked: false }. Elements render in array order (later = on top).
 - sharedElements: elements with an extra pages: ["pageId", ...] field; a shared element renders ONLY on the pages listed there.
 - Colors are "#rrggbb". Common style keys: color, fontSize (number), align: "left"|"center"|"right", verticalAlign: "top"|"middle"|"bottom", radius (corner radius px).
+- Text renders in Liberation Sans Bold with a monochrome emoji fallback: emoji and symbols like 🔥 ⚠ ✅ 🌡 render in the element's text color at about one character width each, so they can be used in text, clock formats, button labels, and script text() output. (Script label() is different: it uses an 8x8 ASCII bitmap font, so no emoji there — they become "?".)
 
 ## Element types (props; style beyond the common keys)
 - text: props {text, wrap}. Plain label.

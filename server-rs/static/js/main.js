@@ -302,7 +302,7 @@ Add this MCP server (Streamable HTTP, no authentication — it runs on my privat
 
 Once connected you have these tools: yello_status, yello_list_designs, yello_get_design, yello_save_design, yello_validate_design, yello_preview_design (renders a design page to a PNG image so you can see it), yello_list_screens, yello_assign_design.
 
-Designs are schema v2 documents: {schemaVersion: 2, name, profile, orientation, background, homePageId, pages: [{id, name, background, elements}], sharedElements, dataSources, actions}. Each element is {id, type, frame: {x, y, w, h}, style, props}. Supported types: text, clock, button, image, container, divider, toggle, slider, nav, screen (embeds another design's page inside the frame), gauge, qr, shape.
+Designs are schema v2 documents: {schemaVersion: 2, name, profile, orientation, background, homePageId, pages: [{id, name, background, elements}], sharedElements, dataSources, actions}. Each element is {id, type, frame: {x, y, w, h}, style, props}. Supported types: text, clock, button, image, container, divider, toggle, slider, nav, screen (embeds another design's page inside the frame), gauge, qr, shape. Text renders in Liberation Sans Bold with a monochrome emoji fallback (emoji render in the text color, about one character width each).
 
 Workflow: first list my designs and screens so you know what exists. Before saving any change, run yello_validate_design, then yello_preview_design and look at the rendered image to check the layout. Save with yello_save_design — saves are pushed to the screens using that design.`;
     }
