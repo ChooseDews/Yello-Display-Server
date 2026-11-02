@@ -1891,14 +1891,45 @@ pub async fn handle_http_request(
                     "connected": session.is_some(),
                     "activeDesignId": active_design_id,
                     "remote": session.map(|s| s.remote.clone()).unwrap_or_default(),
-                    "stream": session.map(|s| json!({
-                        "framesSent": s.frames_sent,
-                        "totalPixels": s.total_pixels,
-                        "totalWireBytes": s.total_wire_bytes,
-                        "totalZoneMessages": s.total_zone_messages,
-                        "lastPushMs": s.last_push_ms,
-                        "lastFrameAt": s.last_frame_at,
-                    })),
+                    "stream": session.map(|s| {
+                        // Per-second rates over the retained sample window
+                        // (one sample per pushed frame, ~10 s): the Studio
+                        // screen cards and the Devices table render these.
+                        let (frames_per_second, pixels_per_second, kilobits_per_second, zones_per_second) =
+                            if s.stream_samples.len() >= 2 {
+                                let span = s.stream_samples.back().unwrap().time
+                                    .duration_since(s.stream_samples.front().unwrap().time)
+                                    .as_secs_f64();
+                                if span > 0.05 {
+                                    let pixels: u64 = s.stream_samples.iter().map(|x| x.pixels).sum();
+                                    let wire: u64 = s.stream_samples.iter().map(|x| x.wire_bytes).sum();
+                                    let zones: u64 = s.stream_samples.iter().map(|x| x.zones as u64).sum();
+                                    (
+                                        s.stream_samples.len() as f64 / span,
+                                        pixels as f64 / span,
+                                        wire as f64 * 8.0 / 1000.0 / span,
+                                        zones as f64 / span,
+                                    )
+                                } else {
+                                    (0.0, 0.0, 0.0, 0.0)
+                                }
+                            } else {
+                                (0.0, 0.0, 0.0, 0.0)
+                            };
+                        json!({
+                            "framesSent": s.frames_sent,
+                            "totalPixels": s.total_pixels,
+                            "totalWireBytes": s.total_wire_bytes,
+                            "totalZoneMessages": s.total_zone_messages,
+                            "lastPushMs": s.last_push_ms,
+                            "lastFrameAt": s.last_frame_at,
+                            "connectedSince": s.connected_since,
+                            "framesPerSecond": frames_per_second,
+                            "pixelsPerSecond": pixels_per_second,
+                            "kilobitsPerSecond": kilobits_per_second,
+                            "zoneMessagesPerSecond": zones_per_second,
+                        })
+                    }),
                     "heartbeat": session.map(|s| json!({
                         "lastPingAt": s.last_ping_at,
                         "wifiRssiDbm": s.wifi_rssi_dbm,

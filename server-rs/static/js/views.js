@@ -325,9 +325,9 @@ export function renderScreenList() {
     if (screen.stream) {
       const metrics = document.createElement("span");
       metrics.className = "screen-card-metrics";
-      metrics.textContent = `${screen.stream.framesPerSecond.toFixed(1)} fps · ${compactNumber(screen.stream.pixelsPerSecond)} px/s · ${screen.stream.kilobitsPerSecond.toFixed(1)} kb/s`;
+      metrics.textContent = `${Number(screen.stream.framesPerSecond || 0).toFixed(1)} fps · ${compactNumber(screen.stream.pixelsPerSecond || 0)} px/s · ${Number(screen.stream.kilobitsPerSecond || 0).toFixed(1)} kb/s`;
       copy.append(metrics);
-      card.title += ` · ${screen.stream.zoneMessagesPerSecond.toFixed(1)} zones/s · last push ${screen.stream.lastPushMs.toFixed(1)} ms`;
+      card.title += ` · ${Number(screen.stream.zoneMessagesPerSecond || 0).toFixed(1)} zones/s · last push ${Number(screen.stream.lastPushMs || 0).toFixed(1)} ms`;
     }
     const state = document.createElement("span");
     state.className = `screen-card-state${screen.connected ? " online" : ""}`;
