@@ -181,7 +181,7 @@ Built-in functions:
 - now("%H:%M") -> the local time formatted with strftime codes (default "%H:%M").
 - number(x, default = 0) -> x as a number, or default when x is not numeric.
 - source("weather") -> the current text of an http-text data source by id (the same values external-text elements display); "" when the source is missing or has not fetched yet.
-- jq(json_text, ".current.temp_c") -> runs a jq program over JSON text (same jq syntax as the jq_design tool) and returns the result: a single scalar output comes back as a number / string / bool; objects, arrays and multi-output programs come back as JSON text (feed it back into jq() to dig deeper). Unparsable JSON returns None — guard with == None. A malformed jq program is a script error.
+- jq(json_text, ".current.temp_c") -> runs a jq program over JSON text (same jq syntax as the jq_read / jq_write tools) and returns the result: a single scalar output comes back as a number / string / bool; objects, arrays and multi-output programs come back as JSON text (feed it back into jq() to dig deeper). Unparsable JSON returns None — guard with == None. A malformed jq program is a script error.
 - len(s) -> string length in characters. str(x), int(x) (truncates toward zero), float(x), bool(x) -> conversions.
 - clamp(x, lo, hi); min(a, b, ...); max(a, b, ...); abs(x); round(x) or round(x, digits); floor(x); ceil(x); pow(x, y); sqrt(x); sin(x), cos(x), tan(x) (radians).
 - lerp(a, b, t) -> a + (b - a) * t. map_range(x, in_min, in_max, out_min, out_max) -> x linearly rescaled from one range to another (e.g. a sensor range to a bar width).
@@ -242,7 +242,7 @@ HA elements and ha() read live entity states from the user's connected Home Assi
 - To change the design, call write_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
 - For a change to ONE existing element, prefer write_element_json: pass the element id and the complete updated element as a JSON object (get_element_json fetches the current one). Reserve write_design_json for structural changes (adding or removing elements or pages).
 - For a change confined to ONE page (renaming it, reworking several of its elements at once), prefer write_page_json: pass the page id and the complete updated page as a JSON object (get_page_json fetches the current one; omit pageId there for the page open in the editor). It replaces just that page; the rest of the design is untouched.
-- For READING the design and for mechanical bulk edits, use jq_design: it runs a jq program over the design JSON on the server (Rust jaq). Reads return just the matching slices ('.pages[] | {id, name}', '[.. | objects | select(.type == "text")]'), and apply=true turns the program's single output into the new design — ideal for renames, prop sweeps, deletes and reorders without re-emitting the document ('.pages[0].elements |= map(if .type == "text" then .style.fontSize = 20 else . end)').
+- For READING the design, use jq_read, and for mechanical bulk edits use jq_write: both take a jq program as one plain string (Rust jaq, run on the server) — no wrapping or escaping, exactly as you would type it at a jq prompt. jq_read returns just the matching slices ('.pages[] | {id, name}', '[.. | objects | select(.type == "text")]'); jq_write replaces the design with the program's single output — ideal for renames, prop sweeps, deletes and reorders without re-emitting the document ('.pages[0].elements |= map(if .type == "text" then .style.fontSize = 20 else . end)').
 - To write or change a script element's code, use write_script_code with the code as one plain string. Never embed script code inside write_design_json or write_element_json payloads — nested inside that JSON, the script's quotes and newlines need double escaping and usually arrive broken.
 - Then call view_screen and actually look at the render before saving: fix overlaps, clipped or unreadable text, and elements running off the page. view_screen renders the open design including your unsaved changes, with live values, and returns an image; pass pageId to inspect a different page, or designId + pageId for another design.
 - After a successful edit (write_design_json, write_page_json, write_element_json, or write_script_code), call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
@@ -331,13 +331,27 @@ const TOOLS = [
   {
     type: "function",
     function: {
-      name: "jq_design",
-      description: "Run a jq program (Rust jaq, full jq syntax) over the open design's JSON — the token-efficient way to read and mechanically edit designs. Read mode (default): returns the program's outputs, e.g. '.pages | map({id, name})', '[.. | objects | select(.type==\"ha-toggle\")]', '.pages[0].elements | length'. Edit mode (apply=true): the program must output exactly ONE value — the complete transformed design — which is validated against the device schema and applied to the editor (jq assignment/update syntax works: '.background = \"#000\"', '.pages |= map(if .id == \"main\" then .name = \"Home\" else . end)', 'del(.pages[] | select(.id == \"old\"))'). Prefer this over write_design_json for mechanical edits; keep using write_script_code to author script code (jq can carry it, but the flat tool avoids escaping accidents).",
+      name: "jq_read",
+      description: "Read the open design with a jq program (Rust jaq, full jq syntax) — the token-efficient way to query a design without fetching it whole. Pass the program as ONE plain string in 'program', exactly as typed at a jq prompt. Returns the program's outputs, e.g. '.pages | map({id, name})', '.pages[0].elements | length', or a select() filter picking elements by type. To change the design, use jq_write.",
       parameters: {
         type: "object",
         properties: {
-          program: { type: "string", description: "The jq program, e.g. '.pages[].name' or '.pages[0].elements |= map(del(.locked))'." },
-          apply: { type: "boolean", description: "true = the program's single output replaces the design (validated + applied to the editor). Default false = read-only query." },
+          program: { type: "string", description: "The jq program as one plain string, e.g. '.pages[].name'." },
+        },
+        required: ["program"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "jq_write",
+      description: "Edit the open design with a jq program (Rust jaq, full jq syntax): the program runs over the design JSON and its output — which must be exactly ONE value, the complete transformed design — is validated against the device schema and applied to the editor. Pass the program as ONE plain string in 'program', exactly as typed at a jq prompt. jq assignment/update syntax works: '.background = \"#000\"', renaming a page by id with a map/if expression, 'del(...)' to remove pages or elements, and '|=' updates to sweep a property across many elements at once. Prefer this over write_design_json for mechanical edits; keep using write_script_code to author script code (jq can carry it, but the flat tool avoids escaping accidents).",
+      parameters: {
+        type: "object",
+        properties: {
+          program: { type: "string", description: "The jq program as one plain string, e.g. '.pages[0].name = \"Home\"'." },
         },
         required: ["program"],
         additionalProperties: false,
@@ -586,7 +600,8 @@ async function toolSetPageJson(args) {
   };
 }
 
-async function toolJqDesign(args) {
+/** Run a jq program (a plain string, taken directly) over the open design. */
+async function runJqOverDesign(args) {
   if (!S.layout) throw new Error("No design is open in the editor yet.");
   const program = typeof args.program === "string" ? args.program : "";
   if (!program.trim()) return { error: "Pass a jq program in 'program'." };
@@ -597,14 +612,23 @@ async function toolJqDesign(args) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) return { error: data.error || `jq failed (server returned ${response.status})` };
-  if (!args.apply) {
-    return { outputs: data.outputs, ...(data.truncated ? { truncated: true } : {}) };
-  }
+  return data;
+}
+
+async function toolJqRead(args) {
+  const data = await runJqOverDesign(args);
+  if (data.error) return data;
+  return { outputs: data.outputs, ...(data.truncated ? { truncated: true } : {}) };
+}
+
+async function toolJqWrite(args) {
+  const data = await runJqOverDesign(args);
+  if (data.error) return data;
   const outputs = Array.isArray(data.outputs) ? data.outputs : [];
   if (outputs.length !== 1 || typeof outputs[0] !== "object" || outputs[0] === null || Array.isArray(outputs[0])) {
     return {
       applied: false,
-      error: `With apply=true the program must output exactly one design object; it output ${outputs.length} value(s)${outputs.length ? `, the first a ${Array.isArray(outputs[0]) ? "array" : typeof outputs[0]}` : ""}. End the program with a single whole-document expression.`,
+      error: `jq_write needs the program to output exactly one design object; it output ${outputs.length} value(s)${outputs.length ? `, the first a ${Array.isArray(outputs[0]) ? "array" : typeof outputs[0]}` : ""}. End the program with a single whole-document expression.`,
     };
   }
   const applied = await applyDesignDoc(outputs[0]);
@@ -794,7 +818,8 @@ const TOOL_IMPL = {
   write_element_json: toolSetElementJson,
   get_page_json: toolGetPageJson,
   write_page_json: toolSetPageJson,
-  jq_design: toolJqDesign,
+  jq_read: toolJqRead,
+  jq_write: toolJqWrite,
   write_script_code: toolSetScriptCode,
   save_design: toolSaveDesign,
   view_screen: toolViewScreen,
