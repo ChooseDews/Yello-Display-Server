@@ -83,15 +83,6 @@ pub fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "yello_validate_design",
-            "description": "Validate a design document without saving it. Returns the normalized schema-v2 document when valid.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"layout": {"type": "object"}},
-                "required": ["layout"]
-            }
-        },
-        {
             "name": "yello_preview_design",
             "description": "Render a design page to a PNG image, exactly as the device would show it. Give designId for a saved design, or layout for an unsaved document; pageId defaults to the design's home page.",
             "inputSchema": {
@@ -251,16 +242,6 @@ async fn tool_save_design(state: &Arc<AppState>, args: &Value) -> Value {
     }
 }
 
-fn tool_validate_design(args: &Value) -> Value {
-    match args.get("layout") {
-        Some(layout) if layout.is_object() => match validate_design(layout.clone()) {
-            Ok(normalized) => tool_json(&json!({"valid": true, "layout": normalized})),
-            Err(e) => tool_error(validation_error_text("invalid layout", &e.errors)),
-        },
-        _ => tool_error("missing required argument: layout (object)".to_string()),
-    }
-}
-
 async fn tool_preview_design(state: &Arc<AppState>, args: &Value) -> Value {
     // Resolve the design document: an inline layout wins, else the saved
     // design named by designId.
@@ -382,7 +363,6 @@ async fn call_tool(state: &Arc<AppState>, params: &Value) -> Value {
         "yello_list_designs" => tool_list_designs(state).await,
         "yello_get_design" => tool_get_design(state, &args).await,
         "yello_save_design" => tool_save_design(state, &args).await,
-        "yello_validate_design" => tool_validate_design(&args),
         "yello_preview_design" => tool_preview_design(state, &args).await,
         "yello_list_screens" => tool_list_screens(state).await,
         "yello_assign_design" => tool_assign_design(state, &args).await,

@@ -79,13 +79,17 @@ async fn test_mcp_handshake_and_tool_list() {
         "yello_list_designs",
         "yello_get_design",
         "yello_save_design",
-        "yello_validate_design",
         "yello_preview_design",
         "yello_list_screens",
         "yello_assign_design",
     ] {
         assert!(names.contains(&expected), "missing tool {}", expected);
     }
+    assert_eq!(names.len(), 7, "exactly seven tools: {:?}", names);
+    assert!(
+        !names.contains(&"yello_validate_design"),
+        "yello_validate_design was removed (save validates)"
+    );
 
     // Unknown method is a JSON-RPC error, not a tool error.
     let (_, resp) = rpc(&state, json!({"jsonrpc": "2.0", "id": 4, "method": "nope"})).await;
@@ -186,11 +190,8 @@ async fn test_mcp_validation_errors_are_tool_errors() {
         "style": {},
         "props": {"label": "Go", "targetDesignId": "page:missing"}
     }]);
-    let result = call_tool(&state, "yello_validate_design", json!({"layout": bad})).await;
-    assert_eq!(result["isError"], true);
-    let text = result["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("unknown page"), "validate text: {}", text);
-
+    // Validation happens inside yello_save_design (there is no separate
+    // validate tool): the same bad layout is rejected with the same text.
     let bad2 = bad.clone();
     let result = call_tool(
         &state,
@@ -199,6 +200,8 @@ async fn test_mcp_validation_errors_are_tool_errors() {
     )
     .await;
     assert_eq!(result["isError"], true);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("unknown page"), "save validation text: {}", text);
     // And it was not saved.
     let result = call_tool(&state, "yello_get_design", json!({"designId": "broken"})).await;
     assert_eq!(result["isError"], true);
