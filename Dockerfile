@@ -1,4 +1,7 @@
-FROM rust:1-slim AS build
+# Pin the build stage to bookworm: the runtime below is debian:bookworm-slim
+# (glibc 2.36), and the floating rust:1-slim now uses a newer Debian whose
+# glibc the bookworm runtime cannot load.
+FROM rust:1-slim-bookworm AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential perl pkg-config \

@@ -3,7 +3,12 @@ use std::collections::HashMap;
 
 #[test]
 fn render_current_layout_debug() {
-    let raw = std::fs::read_to_string("../studio.json").expect("studio.json");
+    // ../studio.json is a local, gitignored fixture (see .gitignore); it is
+    // not present in CI checkouts, so skip gracefully instead of failing.
+    let Ok(raw) = std::fs::read_to_string("../studio.json") else {
+        eprintln!("skipping render_current_layout_debug: ../studio.json not present");
+        return;
+    };
     let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let layout = doc
         .get("designs")
@@ -13,6 +18,7 @@ fn render_current_layout_debug() {
         .expect("default design layout");
     println!("layout bg: {}", layout.get("background").unwrap());
     let ctx = serde_json::json!({"pressed": [], "homeAssistant": {}, "external": {}});
+    std::fs::create_dir_all("/tmp/opencode").unwrap();
     let img = render(&layout, &ctx, &HashMap::new());
     img.save("/tmp/opencode/current_layout.png").unwrap();
 
