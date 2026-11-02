@@ -6,6 +6,10 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
 pub const SCHEMA_VERSION: i32 = 1;
+/// Design-level schema (Tier 2): a design contains pages + shared elements.
+pub const DESIGN_SCHEMA_VERSION: i32 = 2;
+pub const MAX_PAGES: usize = 50;
+pub const DEFAULT_PAGE_ID: &str = "main";
 pub const DISPLAY_WIDTH: u16 = 240;
 pub const DISPLAY_HEIGHT: u16 = 320;
 pub const LANDSCAPE_WIDTH: u16 = 320;
@@ -20,7 +24,7 @@ lazy_static::lazy_static! {
     static ref ID_RE: Regex = Regex::new(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$").unwrap();
     static ref COLOR_RE: Regex = Regex::new(r"^#[0-9a-fA-F]{6}$").unwrap();
     static ref HA_ENTITY_RE: Regex = Regex::new(r"^[a-z0-9_]+\.[a-z0-9_]+$").unwrap();
-    static ref TARGET_DESIGN_RE: Regex = Regex::new(r"^[A-Za-z0-9._:-]{1,64}$").unwrap();
+    static ref TARGET_DESIGN_RE: Regex = Regex::new(r"^[A-Za-z0-9._:/-]{1,64}$").unwrap();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -899,6 +903,403 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
     } else {
         Ok(result)
     }
+}
+
+/// Wrap a validated schema-v1 layout as a schema-v2 design with a single
+/// page holding the layout's elements. Idempotent for v2 designs.
+pub fn migrate_design_to_v2(layout: Value) -> Value {
+    if layout.get("schemaVersion").and_then(|v| v.as_i64()) == Some(DESIGN_SCHEMA_VERSION as i64)
+        || layout.get("pages").is_some()
+    {
+        return layout;
+    }
+    let background = layout
+        .get("background")
+        .and_then(|v| v.as_str())
+        .unwrap_or("#0a0a1e")
+        .to_string();
+    json!({
+        "schemaVersion": DESIGN_SCHEMA_VERSION,
+        "name": layout.get("name").cloned().unwrap_or_else(|| json!("Yello screen")),
+        "profile": layout.get("profile").cloned().unwrap_or_else(|| json!("ili9341-240x320")),
+        "orientation": layout.get("orientation").cloned().unwrap_or_else(|| json!("portrait")),
+        "background": background,
+        "idleHomeSeconds": 0,
+        "dataSources": layout.get("dataSources").cloned().unwrap_or_else(|| json!([])),
+        "actions": layout.get("actions").cloned().unwrap_or_else(|| json!([])),
+        "homePageId": DEFAULT_PAGE_ID,
+        "pages": [{
+            "id": DEFAULT_PAGE_ID,
+            "name": "Main",
+            "background": background,
+            "elements": layout.get("elements").cloned().unwrap_or_else(|| json!([]))
+        }],
+        "sharedElements": []
+    })
+}
+
+/// Navigation target of a design-link element (Tier 2):
+/// `__back`, `__home`, `page:<pageId>` (same design),
+/// `<designId>` (that design's home page), or `<designId>/<pageId>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavTarget {
+    Back,
+    Home,
+    Page(String),
+    Design(String),
+    DesignPage(String, String),
+}
+
+pub fn parse_nav_target(target: &str) -> NavTarget {
+    match target {
+        "__back" => return NavTarget::Back,
+        "__home" => return NavTarget::Home,
+        _ => {}
+    }
+    if let Some(page_id) = target.strip_prefix("page:") {
+        return NavTarget::Page(page_id.to_string());
+    }
+    if let Some((design_id, page_id)) = target.split_once('/') {
+        return NavTarget::DesignPage(design_id.to_string(), page_id.to_string());
+    }
+    NavTarget::Design(target.to_string())
+}
+
+/// The design's home page id, resolved against its actual pages.
+pub fn design_home_page_id(design: &Value) -> String {
+    if let Some(pages) = design.get("pages").and_then(|p| p.as_array()) {
+        if let Some(home) = design.get("homePageId").and_then(|v| v.as_str()) {
+            if pages.iter().any(|p| p.get("id").and_then(|v| v.as_str()) == Some(home)) {
+                return home.to_string();
+            }
+        }
+        if let Some(first) = pages.first().and_then(|p| p.get("id")).and_then(|v| v.as_str()) {
+            return first.to_string();
+        }
+    }
+    DEFAULT_PAGE_ID.to_string()
+}
+
+/// Build the effective v1-shaped layout for one page of a v2 design: the
+/// page's own elements plus the shared elements that explicitly opted
+/// into this page (shared elements render below page elements). Shared
+/// elements are NEVER included implicitly. Returns None when the design
+/// has no pages at all.
+pub fn effective_page_layout(design: &Value, page_id: &str) -> Option<Value> {
+    let pages = design.get("pages").and_then(|p| p.as_array())?;
+    let page = pages
+        .iter()
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(page_id))
+        .or_else(|| {
+            let home = design_home_page_id(design);
+            pages.iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(home.as_str()))
+        })
+        .or_else(|| pages.first())?;
+    let resolved_page_id = page.get("id").and_then(|v| v.as_str()).unwrap_or(page_id);
+
+    let mut elements: Vec<Value> = Vec::new();
+    if let Some(shared) = design.get("sharedElements").and_then(|s| s.as_array()) {
+        for el in shared {
+            let included = el
+                .get("pages")
+                .and_then(|p| p.as_array())
+                .map(|arr| arr.iter().any(|x| x.as_str() == Some(resolved_page_id)))
+                .unwrap_or(false);
+            if included {
+                let mut el = el.clone();
+                if let Some(obj) = el.as_object_mut() {
+                    obj.remove("pages");
+                }
+                elements.push(el);
+            }
+        }
+    }
+    if let Some(els) = page.get("elements").and_then(|e| e.as_array()) {
+        elements.extend(els.iter().cloned());
+    }
+
+    Some(json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "name": page.get("name").cloned().unwrap_or_else(|| design.get("name").cloned().unwrap_or_else(|| json!("Yello screen"))),
+        "profile": design.get("profile").cloned().unwrap_or_else(|| json!("ili9341-240x320")),
+        "orientation": design.get("orientation").cloned().unwrap_or_else(|| json!("portrait")),
+        "background": page.get("background").cloned().unwrap_or_else(|| design.get("background").cloned().unwrap_or_else(|| json!("#0a0a1e"))),
+        "dataSources": design.get("dataSources").cloned().unwrap_or_else(|| json!([])),
+        "actions": design.get("actions").cloned().unwrap_or_else(|| json!([])),
+        "elements": Value::Array(elements)
+    }))
+}
+
+/// Validate a design document. Accepts a v1 layout (migrated to a
+/// single-page v2 design) or a v2 design with pages and opt-in shared
+/// elements. Page element validation reuses the v1 layout validator on a
+/// synthetic layout carrying the design's data sources and actions, so
+/// cross-references (sourceId / actionId) check exactly as before.
+pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
+    if !raw.is_object() {
+        return Err(LayoutValidationError::new("must be an object"));
+    }
+    let is_v2 = raw.get("schemaVersion").and_then(|x| x.as_i64()) == Some(DESIGN_SCHEMA_VERSION as i64)
+        || raw.get("pages").is_some();
+    if !is_v2 {
+        return Ok(migrate_design_to_v2(validate_layout(raw)?));
+    }
+
+    let mut v = Validator::new();
+    let mut errors: Vec<LayoutError> = Vec::new();
+
+    if raw.get("schemaVersion").and_then(|x| x.as_i64()) != Some(DESIGN_SCHEMA_VERSION as i64) {
+        v.error("schemaVersion", &format!("must equal {DESIGN_SCHEMA_VERSION}"));
+    }
+
+    // Header + data sources + actions, normalized by the v1 validator.
+    // Only keys actually present are copied over: a JSON null would fail
+    // the v1 string checks, while an absent key takes the default.
+    let mut skeleton = json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "dataSources": raw.get("dataSources").cloned().unwrap_or_else(|| json!([])),
+        "actions": raw.get("actions").cloned().unwrap_or_else(|| json!([])),
+        "elements": []
+    });
+    for key in ["name", "profile", "orientation", "background"] {
+        if let Some(val) = raw.get(key) {
+            skeleton[key] = val.clone();
+        }
+    }
+    let head = match validate_layout(skeleton) {
+        Ok(h) => h,
+        Err(e) => {
+            errors.extend(e.errors);
+            json!({
+                "name": "Yello screen", "profile": "ili9341-240x320",
+                "orientation": "portrait", "background": "#0a0a1e",
+                "dataSources": [], "actions": []
+            })
+        }
+    };
+    let orientation = head["orientation"].as_str().unwrap_or("portrait").to_string();
+    let design_background = head["background"].as_str().unwrap_or("#0a0a1e").to_string();
+
+    let idle_home_seconds = v.integer(raw.get("idleHomeSeconds"), "idleHomeSeconds", 0, 0, 86400);
+
+    // ---- Pages ----
+    let mut pages_out: Vec<Value> = Vec::new();
+    let mut page_ids: Vec<String> = Vec::new();
+    match raw.get("pages") {
+        Some(Value::Array(raw_pages)) => {
+            if raw_pages.is_empty() {
+                v.error("pages", "must contain at least one page");
+            }
+            if raw_pages.len() > MAX_PAGES {
+                v.error("pages", &format!("must contain at most {MAX_PAGES} pages"));
+            }
+            for (index, raw_page) in raw_pages.iter().take(MAX_PAGES).enumerate() {
+                let path = format!("pages[{index}]");
+                if !raw_page.is_object() {
+                    v.error(&path, "must be an object");
+                    continue;
+                }
+                let fallback = format!("page{}", index + 1);
+                let id = v.identifier(raw_page.get("id"), &format!("{path}.id"), &fallback);
+                if page_ids.contains(&id) {
+                    v.error(&format!("{path}.id"), "must be unique");
+                }
+                page_ids.push(id.clone());
+                let page_name = v.string(raw_page.get("name"), &format!("{path}.name"), "Page", 100);
+
+                let page_skeleton = json!({
+                    "schemaVersion": SCHEMA_VERSION,
+                    "name": head["name"],
+                    "profile": head["profile"],
+                    "orientation": orientation,
+                    "background": raw_page.get("background").cloned().unwrap_or_else(|| json!(design_background.clone())),
+                    "dataSources": raw.get("dataSources").cloned().unwrap_or_else(|| json!([])),
+                    "actions": raw.get("actions").cloned().unwrap_or_else(|| json!([])),
+                    "elements": raw_page.get("elements").cloned().unwrap_or_else(|| json!([]))
+                });
+                let (page_background, page_elements) = match validate_layout(page_skeleton) {
+                    Ok(norm) => (
+                        norm["background"].as_str().unwrap_or(&design_background).to_string(),
+                        norm["elements"].clone(),
+                    ),
+                    Err(e) => {
+                        for err in e.errors {
+                            if err.path.starts_with("elements") {
+                                errors.push(LayoutError {
+                                    path: format!("{path}.{}", err.path),
+                                    message: err.message,
+                                });
+                            } else if err.path == "background" {
+                                errors.push(LayoutError {
+                                    path: format!("{path}.background"),
+                                    message: err.message,
+                                });
+                            }
+                        }
+                        (design_background.clone(), json!([]))
+                    }
+                };
+
+                pages_out.push(json!({
+                    "id": id,
+                    "name": page_name,
+                    "background": page_background,
+                    "elements": page_elements
+                }));
+            }
+        }
+        Some(_) => v.error("pages", "must be an array"),
+        None => v.error("pages", "must be an array"),
+    }
+
+    // ---- Home page ----
+    let home_default = page_ids.first().cloned().unwrap_or_else(|| DEFAULT_PAGE_ID.to_string());
+    let home_page_id = v.string(raw.get("homePageId"), "homePageId", &home_default, 64);
+    let home_page_id = if page_ids.contains(&home_page_id) {
+        home_page_id
+    } else {
+        if raw.get("homePageId").is_some() {
+            v.error("homePageId", "must be the id of a page in this design");
+        }
+        home_default.clone()
+    };
+
+    // ---- Shared elements (opt-in per page; default: no pages) ----
+    let mut shared_out: Vec<Value> = Vec::new();
+    if let Some(shared_raw) = raw.get("sharedElements") {
+        match shared_raw.as_array() {
+            Some(shared_arr) => {
+                let shared_skeleton = json!({
+                    "schemaVersion": SCHEMA_VERSION,
+                    "name": head["name"],
+                    "profile": head["profile"],
+                    "orientation": orientation,
+                    "background": design_background,
+                    "dataSources": raw.get("dataSources").cloned().unwrap_or_else(|| json!([])),
+                    "actions": raw.get("actions").cloned().unwrap_or_else(|| json!([])),
+                    "elements": Value::Array(shared_arr.clone())
+                });
+                match validate_layout(shared_skeleton) {
+                    Ok(norm) => {
+                        let norm_elements = norm["elements"].as_array().cloned().unwrap_or_default();
+                        for (index, mut el) in norm_elements.into_iter().enumerate() {
+                            let mut member_pages: Vec<String> = Vec::new();
+                            if let Some(pages_val) = shared_arr.get(index).and_then(|e| e.get("pages")) {
+                                match pages_val.as_array() {
+                                    Some(arr) => {
+                                        for entry in arr {
+                                            match entry.as_str() {
+                                                Some(pid) if page_ids.iter().any(|p| p == pid) => {
+                                                    if !member_pages.contains(&pid.to_string()) {
+                                                        member_pages.push(pid.to_string());
+                                                    }
+                                                }
+                                                _ => v.error(
+                                                    &format!("sharedElements[{index}].pages"),
+                                                    "must list only page ids in this design",
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    None => v.error(
+                                        &format!("sharedElements[{index}].pages"),
+                                        "must be an array of page ids",
+                                    ),
+                                }
+                            }
+                            if let Some(obj) = el.as_object_mut() {
+                                obj.insert("pages".to_string(), json!(member_pages));
+                            }
+                            shared_out.push(el);
+                        }
+                    }
+                    Err(e) => {
+                        for err in e.errors {
+                            if err.path.starts_with("elements") {
+                                errors.push(LayoutError {
+                                    path: format!("sharedElements{}", &err.path["elements".len()..]),
+                                    message: err.message,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            None => v.error("sharedElements", "must be an array"),
+        }
+    }
+
+    // ---- Internal design-link targets must point at real pages ----
+    let check_targets = |elements: &Value, root: &str, v: &mut Validator| {
+        if let Some(arr) = elements.as_array() {
+            for (index, el) in arr.iter().enumerate() {
+                if el.get("type").and_then(|t| t.as_str()) != Some("design-link") {
+                    continue;
+                }
+                let target = el
+                    .get("props")
+                    .and_then(|p| p.get("targetDesignId"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if let NavTarget::Page(pid) = parse_nav_target(target) {
+                    if !page_ids.contains(&pid) {
+                        v.error(
+                            &format!("{root}[{index}].props.targetDesignId"),
+                            "references an unknown page in this design",
+                        );
+                    }
+                }
+            }
+        }
+    };
+    for (index, page) in pages_out.iter().enumerate() {
+        check_targets(&page["elements"], &format!("pages[{index}].elements"), &mut v);
+    }
+    check_targets(&Value::Array(shared_out.clone()), "sharedElements", &mut v);
+
+    // ---- Shared element ids must not collide with a page's own elements
+    // on any page the shared element is included on ----
+    for (s_index, shared_el) in shared_out.iter().enumerate() {
+        let shared_id = shared_el.get("id").and_then(|i| i.as_str()).unwrap_or("");
+        let member_pages: Vec<&str> = shared_el
+            .get("pages")
+            .and_then(|p| p.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        for page in &pages_out {
+            let pid = page.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            if !member_pages.contains(&pid) {
+                continue;
+            }
+            if let Some(elements) = page["elements"].as_array() {
+                if elements.iter().any(|e| e.get("id").and_then(|i| i.as_str()) == Some(shared_id)) {
+                    v.error(
+                        &format!("sharedElements[{s_index}].id"),
+                        &format!("duplicates an element id on page '{pid}' where it is included"),
+                    );
+                }
+            }
+        }
+    }
+
+    errors.extend(v.errors);
+    if !errors.is_empty() {
+        return Err(LayoutValidationError { errors });
+    }
+
+    Ok(json!({
+        "schemaVersion": DESIGN_SCHEMA_VERSION,
+        "name": head["name"],
+        "profile": head["profile"],
+        "orientation": orientation,
+        "background": design_background,
+        "idleHomeSeconds": idle_home_seconds,
+        "dataSources": head["dataSources"],
+        "actions": head["actions"],
+        "homePageId": home_page_id,
+        "pages": pages_out,
+        "sharedElements": shared_out
+    }))
 }
 
 pub fn find_by_id<'a>(items: &'a [Value], item_id: &str) -> Option<&'a Value> {

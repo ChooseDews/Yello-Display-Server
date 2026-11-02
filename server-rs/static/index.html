@@ -65,6 +65,7 @@
           <button data-add-type="ha-toggle"><span class="palette-icon">⏻</span><span>HA toggle</span></button>
           <button data-add-type="script"><span class="palette-icon">{ }</span><span>Script</span></button>
         </div>
+        <button id="add-shared-toggle" class="shared-toggle" type="button" aria-pressed="false" title="When on, new blocks are created as shared blocks included on the current page. Tick more pages in the Inspector — a shared block is never added to a page you did not choose.">⇄ Add as shared block</button>
       </section>
 
       <section class="panel-section layers-section">
@@ -91,6 +92,7 @@
           <button id="zoom-in" aria-label="Zoom in">+</button>
         </div>
       </div>
+      <div id="page-strip" class="page-strip" aria-label="Design pages"></div>
       <div id="canvas-scroll" class="canvas-scroll">
         <div id="flow-canvas" class="flow-canvas hidden" aria-label="Connected screens flow">
           <svg id="flow-connectors" class="flow-connectors" aria-hidden="true"></svg>
@@ -106,8 +108,8 @@
       <div id="code-editor-pane" class="code-editor-pane hidden">
         <div class="code-editor-heading">
           <div>
-            <strong>Layout JSON</strong>
-            <span id="code-editor-state">Edit the complete normalized design configuration.</span>
+            <strong>Design JSON</strong>
+            <span id="code-editor-state">Edit the complete normalized design configuration, pages included.</span>
           </div>
           <div class="code-editor-actions">
             <button id="format-json" type="button" class="secondary-button">Format</button>
@@ -129,13 +131,17 @@
         <div class="field-grid">
           <label for="screen-name">Name</label>
           <input id="screen-name" type="text" maxlength="100">
-          <label for="background">Background</label>
+          <label for="page-name">Page name</label>
+          <input id="page-name" type="text" maxlength="100">
+          <label for="background">Page background</label>
           <div class="color-field"><input id="background" type="color"><span id="background-value"></span></div>
           <label for="orientation">Orientation</label>
           <select id="orientation">
             <option value="portrait">Portrait · 240 × 320</option>
             <option value="landscape">Landscape · 320 × 240</option>
           </select>
+          <label for="idle-home">Idle → home</label>
+          <div class="color-field"><input id="idle-home" type="number" min="0" max="86400" step="5"><span>sec · 0 = off</span></div>
         </div>
       </section>
 
@@ -220,6 +226,7 @@
       <form id="app-modal-form">
         <label id="app-modal-input-label" class="hidden" for="app-modal-input"></label>
         <input id="app-modal-input" class="hidden" type="text" autocomplete="off">
+        <div id="app-modal-options" class="app-modal-options hidden"></div>
         <div class="app-modal-actions">
           <button id="app-modal-cancel" type="button" class="secondary-button">Cancel</button>
           <button id="app-modal-confirm" type="submit" class="primary-button">Confirm</button>
@@ -228,6 +235,6 @@
     </section>
   </div>
   <datalist id="ha-entity-options"></datalist>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

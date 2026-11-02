@@ -148,6 +148,13 @@ pub struct DeviceSession {
     pub wifi_rssi_dbm: Option<i16>,
     pub uptime_ms: u64,
     pub active_design_id: String,
+    /// Current page within the active design (Tier 2); resolved against
+    /// the design's pages on every use, falling back to its home page.
+    pub active_page_id: String,
+    /// (design, page) history for `__back` navigation.
+    pub nav_stack: Vec<(String, String)>,
+    /// Last touch or navigation; drives the idle return-to-home.
+    pub last_interaction: Instant,
     pub ws_sender: Option<mpsc::UnboundedSender<WsMessage>>,
     /// Serializes frame pushes per device so the global device map is never
     /// held across the (paced) zone send loop.
@@ -197,7 +204,8 @@ pub struct Studio {
 
 impl Studio {
     pub fn new(initial_layout: Option<Value>) -> Self {
-        let layout = validate_layout(initial_layout.unwrap_or_else(default_layout)).unwrap_or_else(|_| default_layout());
+        let layout = validate_design(initial_layout.unwrap_or_else(default_layout))
+            .unwrap_or_else(|_| migrate_design_to_v2(default_layout()));
         let name = layout.get("name").and_then(|v| v.as_str()).unwrap_or("Default design").to_string();
         let mut designs = HashMap::new();
         designs.insert(
@@ -210,7 +218,7 @@ impl Studio {
             },
         );
         Self {
-            schema_version: 1,
+            schema_version: DESIGN_SCHEMA_VERSION,
             designs,
             screens: HashMap::new(),
         }
@@ -285,14 +293,15 @@ impl AppState {
     pub async fn load_studio_file(&self) {
         match tokio::fs::read_to_string(&self.studio_path).await {
             Ok(content) => match serde_json::from_str::<Value>(&content) {
-                Ok(val) if val.get("schemaVersion").and_then(|v| v.as_i64()) == Some(1) => {
+                Ok(val) if matches!(val.get("schemaVersion").and_then(|v| v.as_i64()), Some(1) | Some(2)) => {
+                    let file_version = val.get("schemaVersion").and_then(|v| v.as_i64()).unwrap_or(1);
                     if let Some(designs_map) = val.get("designs").and_then(|v| v.as_object()) {
                         let mut designs = HashMap::new();
                         for (d_id, d_rec) in designs_map {
                             if !DEVICE_ID_RE.is_match(d_id) {
                                 continue;
                             }
-                            match validate_layout(d_rec.get("layout").cloned().unwrap_or_else(|| json!({}))) {
+                            match validate_design(d_rec.get("layout").cloned().unwrap_or_else(|| json!({}))) {
                                 Ok(layout) => {
                                     let name = d_rec.get("name").and_then(|v| v.as_str()).unwrap_or(d_id).to_string();
                                     let revision = d_rec.get("revision").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -316,9 +325,29 @@ impl AppState {
                         }
 
                         if !designs.is_empty() {
-                            let mut st = self.studio.write().await;
-                            st.designs = designs;
-                            st.screens = screens;
+                            {
+                                let mut st = self.studio.write().await;
+                                st.designs = designs;
+                                st.screens = screens;
+                            }
+                            if file_version < DESIGN_SCHEMA_VERSION as i64 {
+                                // One-time v1 -> v2 migration: keep the
+                                // original document next to the studio
+                                // file, then persist the migrated one.
+                                let backup = self.studio_path.with_file_name(format!(
+                                    "{}.v1.bak",
+                                    self.studio_path.file_name().and_then(|n| n.to_str()).unwrap_or("studio.json")
+                                ));
+                                if !tokio::fs::try_exists(&backup).await.unwrap_or(false) {
+                                    let _ = write_atomic(&backup, content.as_bytes()).await;
+                                }
+                                eprintln!(
+                                    "migrated studio file {} from schema v{file_version} to v{DESIGN_SCHEMA_VERSION} (backup: {})",
+                                    self.studio_path.display(),
+                                    backup.display()
+                                );
+                                self.save_studio_file().await;
+                            }
                             return;
                         }
                         eprintln!(
@@ -357,6 +386,146 @@ pub fn design_id_for_session(studio: &Studio, session: &DeviceSession) -> String
         }
     }
     DEFAULT_DESIGN_ID.to_string()
+}
+
+/// Whether a v2 design layout contains a page with this id.
+pub fn design_page_exists(design_layout: &Value, page_id: &str) -> bool {
+    design_layout
+        .get("pages")
+        .and_then(|p| p.as_array())
+        .map(|pages| pages.iter().any(|p| p.get("id").and_then(|v| v.as_str()) == Some(page_id)))
+        .unwrap_or(false)
+}
+
+/// Resolve the session's current (design, page): the active design via
+/// `design_id_for_session`, and the active page if it still exists in
+/// that design, otherwise the design's home page.
+pub fn active_target(studio: &Studio, session: &DeviceSession) -> (String, String) {
+    let design_id = design_id_for_session(studio, session);
+    let page_id = match studio.designs.get(&design_id) {
+        Some(design) => {
+            if design_page_exists(&design.layout, &session.active_page_id) {
+                session.active_page_id.clone()
+            } else {
+                design_home_page_id(&design.layout)
+            }
+        }
+        None => DEFAULT_PAGE_ID.to_string(),
+    };
+    (design_id, page_id)
+}
+
+/// The (design, page) a device returns to on `__home` / idle timeout:
+/// its assigned design's home page.
+pub fn home_target(studio: &Studio, session: &DeviceSession) -> (String, String) {
+    let assigned = studio
+        .screens
+        .get(&session.device_id)
+        .map(|s| s.design_id.clone())
+        .unwrap_or_else(|| DEFAULT_DESIGN_ID.to_string());
+    let design_id = if studio.designs.contains_key(&assigned) {
+        assigned
+    } else {
+        DEFAULT_DESIGN_ID.to_string()
+    };
+    let page_id = studio
+        .designs
+        .get(&design_id)
+        .map(|d| design_home_page_id(&d.layout))
+        .unwrap_or_else(|| DEFAULT_PAGE_ID.to_string());
+    (design_id, page_id)
+}
+
+/// All elements of a v2 design across its pages plus its shared pool.
+/// Used by the polling loops (images, Home Assistant), which work at
+/// design level rather than per page.
+pub fn all_design_elements(design_layout: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    if let Some(pages) = design_layout.get("pages").and_then(|p| p.as_array()) {
+        for page in pages {
+            if let Some(elements) = page.get("elements").and_then(|e| e.as_array()) {
+                out.extend(elements.iter().cloned());
+            }
+        }
+    }
+    if let Some(shared) = design_layout.get("sharedElements").and_then(|s| s.as_array()) {
+        out.extend(shared.iter().cloned());
+    }
+    out
+}
+
+/// Image sources wanted by any page or shared element of a design.
+pub fn design_image_sources(design_layout: &Value) -> HashSet<String> {
+    all_design_elements(design_layout)
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("image"))
+        .filter_map(|e| {
+            e.get("props")
+                .and_then(|p| p.get("src"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .collect()
+}
+
+/// Studio-level design-link check for a design being saved: targets of
+/// the forms `<designId>` and `<designId>/<pageId>` must exist (the
+/// design itself is checked against its NEW layout). `page:` targets are
+/// already validated inside `validate_design`.
+pub fn cross_design_link_errors(studio: &Studio, self_id: &str, layout: &Value) -> Vec<LayoutError> {
+    let mut errors = Vec::new();
+    let mut check = |target: &str, path: String| match parse_nav_target(target) {
+        NavTarget::Design(design_id) => {
+            if design_id != self_id && !studio.designs.contains_key(&design_id) {
+                errors.push(LayoutError {
+                    path,
+                    message: format!("references unknown design '{design_id}'"),
+                });
+            }
+        }
+        NavTarget::DesignPage(design_id, page_id) => {
+            let target_layout = if design_id == self_id {
+                Some(layout)
+            } else {
+                studio.designs.get(&design_id).map(|d| &d.layout)
+            };
+            match target_layout {
+                None => errors.push(LayoutError {
+                    path,
+                    message: format!("references unknown design '{design_id}'"),
+                }),
+                Some(l) if !design_page_exists(l, &page_id) => errors.push(LayoutError {
+                    path,
+                    message: format!("references unknown page '{page_id}' in design '{design_id}'"),
+                }),
+                _ => {}
+            }
+        }
+        _ => {}
+    };
+
+    if let Some(pages) = layout.get("pages").and_then(|p| p.as_array()) {
+        for (pi, page) in pages.iter().enumerate() {
+            if let Some(elements) = page.get("elements").and_then(|e| e.as_array()) {
+                for (ei, el) in elements.iter().enumerate() {
+                    if el.get("type").and_then(|t| t.as_str()) == Some("design-link") {
+                        let target = el.get("props").and_then(|p| p.get("targetDesignId")).and_then(|t| t.as_str()).unwrap_or("");
+                        check(target, format!("pages[{pi}].elements[{ei}].props.targetDesignId"));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(shared) = layout.get("sharedElements").and_then(|s| s.as_array()) {
+        for (ei, el) in shared.iter().enumerate() {
+            if el.get("type").and_then(|t| t.as_str()) == Some("design-link") {
+                let target = el.get("props").and_then(|p| p.get("targetDesignId")).and_then(|t| t.as_str()).unwrap_or("");
+                check(target, format!("sharedElements[{ei}].props.targetDesignId"));
+            }
+        }
+    }
+    errors
 }
 
 pub fn build_render_context(
@@ -405,19 +574,24 @@ pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> R
 
     // Phase 1: snapshot session state. The global device map is locked only
     // for these clones — never across the render or the paced zone send.
-    let (ws_sender, design_id, orientation, prev_frame, pressed, dots, last_full_push) = {
+    let (ws_sender, design_id, page_id, orientation, prev_frame, pressed, dots, last_full_push) = {
         let studio = state.studio.read().await;
         let mut devices = state.devices.write().await;
         let session = match devices.get_mut(device_id) {
             Some(s) => s,
             None => return Err("device not found".to_string()),
         };
-        let design_id = design_id_for_session(&studio, session);
+        let (design_id, page_id) = active_target(&studio, session);
+        // Persist the resolved target so fallbacks (deleted page/design)
+        // don't have to be recomputed on every push.
+        session.active_design_id = design_id.clone();
+        session.active_page_id = page_id.clone();
         let now = Instant::now();
         session.dots.retain(|(_, _, exp)| *exp > now);
         (
             session.ws_sender.clone(),
             design_id,
+            page_id,
             session.orientation.clone(),
             session.last_frame.clone(),
             session.pressed.clone(),
@@ -438,6 +612,9 @@ pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> R
             None => return Err("design not found".to_string()),
         }
     };
+    // From here on, work with the active page's effective v1-shaped
+    // layout (page elements + the shared elements opted into this page).
+    let layout = effective_page_layout(&layout, &page_id).unwrap_or(layout);
 
     // Phase 2: lock-free render, region diff, encode and paced send.
     let mut full = full;
@@ -586,15 +763,52 @@ pub fn start_background_tasks(state: Arc<AppState>) {
             };
             let now = Instant::now();
             for dev_id in device_ids {
+                // Idle return-to-home (per-design idleHomeSeconds, 0 = off):
+                // a device left on a sub-page drops back to its home page.
+                let idle_reset = {
+                    let studio = st_render.studio.read().await;
+                    let mut devices = st_render.devices.write().await;
+                    match devices.get_mut(&dev_id) {
+                        Some(session) => {
+                            let (d_id, p_id) = active_target(&studio, session);
+                            let idle_secs = studio
+                                .designs
+                                .get(&d_id)
+                                .and_then(|d| d.layout.get("idleHomeSeconds"))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let home = home_target(&studio, session);
+                            if idle_secs > 0
+                                && (d_id, p_id) != home
+                                && now.duration_since(session.last_interaction).as_secs() >= idle_secs
+                            {
+                                session.active_design_id = home.0;
+                                session.active_page_id = home.1;
+                                session.nav_stack.clear();
+                                session.last_interaction = now;
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        None => false,
+                    }
+                };
                 // Designs with a visible clock/script tick every second;
                 // static designs only need a 30 s tick (Python parity).
-                let due = {
+                // Animation is judged on the ACTIVE page's effective layout.
+                let due = idle_reset || {
                     let studio = st_render.studio.read().await;
                     let devices = st_render.devices.read().await;
                     match devices.get(&dev_id) {
                         Some(session) => {
-                            let d_id = design_id_for_session(&studio, session);
-                            let animated = studio.designs.get(&d_id).map(|d| layout_has_animation(&d.layout)).unwrap_or(true);
+                            let (d_id, p_id) = active_target(&studio, session);
+                            let animated = studio
+                                .designs
+                                .get(&d_id)
+                                .and_then(|d| effective_page_layout(&d.layout, &p_id))
+                                .map(|eff| layout_has_animation(&eff))
+                                .unwrap_or(true);
                             animated || now.duration_since(session.last_tick).as_secs_f64() >= 30.0
                         }
                         None => false,
@@ -679,7 +893,7 @@ pub fn start_background_tasks(state: Arc<AppState>) {
             let studio = st_img.studio.read().await.clone();
             let mut wanted: HashSet<String> = HashSet::new();
             for (_, design) in &studio.designs {
-                for src in wanted_image_sources(&design.layout) {
+                for src in design_image_sources(&design.layout) {
                     wanted.insert(src);
                 }
             }
@@ -726,7 +940,7 @@ pub fn start_background_tasks(state: Arc<AppState>) {
                             // Python parity: re-push every design using this image.
                             let studio = img_state.studio.read().await;
                             let design_ids: Vec<String> = studio.designs.iter()
-                                .filter(|(_, d)| wanted_image_sources(&d.layout).contains(&url))
+                                .filter(|(_, d)| design_image_sources(&d.layout).contains(&url))
                                 .map(|(id, _)| id.clone())
                                 .collect();
                             drop(studio);
@@ -759,16 +973,14 @@ pub fn start_background_tasks(state: Arc<AppState>) {
                 let studio = st_ha.studio.read().await;
                 let mut specs = HashMap::new();
                 for (_, design) in &studio.designs {
-                    if let Some(elements) = design.layout.get("elements").and_then(|v| v.as_array()) {
-                        for elem in elements {
-                            let etype = elem.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            let props = elem.get("props").unwrap_or(&Value::Null);
-                            if etype == "ha-state" || etype == "ha-toggle" {
-                                let eid = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
-                                let refresh = props.get("refreshInterval").and_then(|v| v.as_u64()).unwrap_or(5);
-                                if !eid.is_empty() {
-                                    specs.insert(eid.to_string(), refresh);
-                                }
+                    for elem in all_design_elements(&design.layout) {
+                        let etype = elem.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let props = elem.get("props").unwrap_or(&Value::Null);
+                        if etype == "ha-state" || etype == "ha-toggle" {
+                            let eid = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
+                            let refresh = props.get("refreshInterval").and_then(|v| v.as_u64()).unwrap_or(5);
+                            if !eid.is_empty() {
+                                specs.insert(eid.to_string(), refresh);
                             }
                         }
                     }
@@ -871,6 +1083,14 @@ pub async fn handle_device_ws(
         let studio = state.studio.read().await;
         studio.screens.get(&device_id).map(|s| s.design_id.clone()).unwrap_or_else(|| DEFAULT_DESIGN_ID.to_string())
     };
+    let initial_page_id = {
+        let studio = state.studio.read().await;
+        studio
+            .designs
+            .get(&initial_design_id)
+            .map(|d| design_home_page_id(&d.layout))
+            .unwrap_or_else(|| DEFAULT_PAGE_ID.to_string())
+    };
 
     {
         let mut devices = state.devices.write().await;
@@ -897,6 +1117,9 @@ pub async fn handle_device_ws(
                 wifi_rssi_dbm: None,
                 uptime_ms: 0,
                 active_design_id: initial_design_id,
+                active_page_id: initial_page_id,
+                nav_stack: Vec::new(),
+                last_interaction: Instant::now(),
                 ws_sender: Some(tx.clone()),
                 push_lock: Arc::new(Mutex::new(())),
                 last_tick: Instant::now(),
@@ -1002,6 +1225,78 @@ async fn fire_element_action(state: &Arc<AppState>, layout: &Value, hit: &Value)
     }
 }
 
+/// Apply a design-link navigation target to a device session (Tier 2):
+/// pushes the current (design, page) onto the nav stack for forward
+/// jumps, pops it for `__back`, and resets to the assigned home page
+/// for `__home`. Unknown designs/pages are ignored (save-time validation
+/// is responsible for catching them in authored designs).
+pub async fn apply_navigation(state: &Arc<AppState>, device_id: &str, target: &str) {
+    let nav = parse_nav_target(target);
+    let studio = state.studio.read().await;
+    let mut devices = state.devices.write().await;
+    let session = match devices.get_mut(device_id) {
+        Some(s) => s,
+        None => return,
+    };
+    let current = active_target(&studio, session);
+    match nav {
+        NavTarget::Back => match session.nav_stack.pop() {
+            Some((design_id, page_id)) => {
+                session.active_design_id = design_id;
+                session.active_page_id = page_id;
+            }
+            None => {
+                let home = home_target(&studio, session);
+                session.active_design_id = home.0;
+                session.active_page_id = home.1;
+            }
+        },
+        NavTarget::Home => {
+            let home = home_target(&studio, session);
+            session.active_design_id = home.0;
+            session.active_page_id = home.1;
+            session.nav_stack.clear();
+        }
+        NavTarget::Page(page_id) => {
+            let design_ok = studio
+                .designs
+                .get(&current.0)
+                .map(|d| design_page_exists(&d.layout, &page_id))
+                .unwrap_or(false);
+            if design_ok && current.1 != page_id {
+                session.nav_stack.push(current.clone());
+                session.active_page_id = page_id;
+            }
+        }
+        NavTarget::Design(design_id) => {
+            if let Some(design) = studio.designs.get(&design_id) {
+                let target = (design_id, design_home_page_id(&design.layout));
+                if target != current {
+                    session.nav_stack.push(current);
+                    session.active_design_id = target.0;
+                    session.active_page_id = target.1;
+                }
+            }
+        }
+        NavTarget::DesignPage(design_id, page_id) => {
+            let page_ok = studio
+                .designs
+                .get(&design_id)
+                .map(|d| design_page_exists(&d.layout, &page_id))
+                .unwrap_or(false);
+            if page_ok {
+                let target = (design_id, page_id);
+                if target != current {
+                    session.nav_stack.push(current);
+                    session.active_design_id = target.0;
+                    session.active_page_id = target.1;
+                }
+            }
+        }
+    }
+    session.last_interaction = Instant::now();
+}
+
 async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: i32) {
     let (_design_id, layout) = {
         let studio = state.studio.read().await;
@@ -1010,10 +1305,23 @@ async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: 
             Some(s) => s,
             None => return,
         };
-        let d_id = design_id_for_session(&studio, session);
-        let lay = studio.designs.get(&d_id).map(|d| d.layout.clone()).unwrap_or_else(default_layout);
+        let (d_id, p_id) = active_target(&studio, session);
+        let design_layout = studio
+            .designs
+            .get(&d_id)
+            .map(|d| d.layout.clone())
+            .unwrap_or_else(|| migrate_design_to_v2(default_layout()));
+        let lay = effective_page_layout(&design_layout, &p_id).unwrap_or_else(default_layout);
         (d_id, lay)
     };
+
+    // Any touch counts as interaction for the idle return-to-home.
+    {
+        let mut devices = state.devices.write().await;
+        if let Some(session) = devices.get_mut(device_id) {
+            session.last_interaction = Instant::now();
+        }
+    }
 
     // Add dot feedback
     {
@@ -1049,10 +1357,7 @@ async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: 
         });
 
         if let Some(target) = fire_element_action(state, &layout, hit).await {
-            let mut devices = state.devices.write().await;
-            if let Some(session) = devices.get_mut(device_id) {
-                session.active_design_id = target;
-            }
+            apply_navigation(state, device_id, &target).await;
         }
     }
 
@@ -1110,7 +1415,7 @@ pub async fn handle_http_request(
             let design_id = query_param(&req, "design").unwrap_or_else(|| DEFAULT_DESIGN_ID.to_string());
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
             match serde_json::from_slice::<Value>(&body_bytes) {
-                Ok(raw) => match validate_layout(raw) {
+                Ok(raw) => match validate_design(raw) {
                     Ok(layout) => {
                         let exists = {
                             let studio = state.studio.read().await;
@@ -1118,6 +1423,15 @@ pub async fn handle_http_request(
                         };
                         if !exists {
                             return Ok(json_response(StatusCode::NOT_FOUND, &json!({"error": "design not found"})));
+                        }
+                        // Cross-design link targets must exist (page:
+                        // targets were already checked in validate_design).
+                        let link_errors = {
+                            let studio = state.studio.read().await;
+                            cross_design_link_errors(&studio, &design_id, &layout)
+                        };
+                        if !link_errors.is_empty() {
+                            return Ok(json_response(StatusCode::UNPROCESSABLE_ENTITY, &json!({"error": "invalid layout", "details": link_errors})));
                         }
                         let mut studio = state.studio.write().await;
                         let design = studio.designs.get_mut(&design_id).unwrap();
@@ -1145,7 +1459,7 @@ pub async fn handle_http_request(
         (Method::POST, "/api/layout/validate") => {
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
             match serde_json::from_slice::<Value>(&body_bytes) {
-                Ok(raw) => match validate_layout(raw) {
+                Ok(raw) => match validate_design(raw) {
                     Ok(layout) => json_response(StatusCode::OK, &json!({"status": "ok", "layout": layout})),
                     Err(e) => json_response(StatusCode::UNPROCESSABLE_ENTITY, &json!({"error": "invalid layout", "details": e.errors})),
                 },
@@ -1164,8 +1478,14 @@ pub async fn handle_http_request(
                 Ok(raw) => {
                     let x = raw.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                     let y = raw.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                    match raw.get("layout").cloned().map(validate_layout) {
-                        Some(Ok(layout)) => {
+                    match raw.get("layout").cloned().map(validate_design) {
+                        Some(Ok(design)) => {
+                            let page_id = raw
+                                .get("pageId")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| design_home_page_id(&design));
+                            let layout = effective_page_layout(&design, &page_id).unwrap_or_else(default_layout);
                             let hit = renderer::hit_test_buttons(&layout, x, y);
                             let hit_id = hit
                                 .and_then(|h| h.get("id"))
@@ -1212,10 +1532,13 @@ pub async fn handle_http_request(
         (Method::POST, "/api/preview") => {
             let design_id = query_param(&req, "design").unwrap_or_else(|| DEFAULT_DESIGN_ID.to_string());
             let live = query_param(&req, "live").as_deref() == Some("1");
+            let page_param = query_param(&req, "page");
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
             match serde_json::from_slice::<Value>(&body_bytes) {
-                Ok(raw) => match validate_layout(raw) {
-                    Ok(layout) => {
+                Ok(raw) => match validate_design(raw) {
+                    Ok(design) => {
+                        let page_id = page_param.unwrap_or_else(|| design_home_page_id(&design));
+                        let layout = effective_page_layout(&design, &page_id).unwrap_or_else(default_layout);
                         let ext_vals = state.external_values.read().await;
                         let ha_vals = state.ha_values.read().await;
                         // In live mode, render the design's live preview
@@ -1249,6 +1572,7 @@ pub async fn handle_http_request(
                     (name == "design").then(|| value.to_string())
                 })
                 .unwrap_or_else(|| DEFAULT_DESIGN_ID.to_string());
+            let page_param = query_param(&req, "page");
             let studio = state.studio.read().await;
             match studio.designs.get(&design_id) {
                 Some(design) => {
@@ -1258,7 +1582,9 @@ pub async fn handle_http_request(
                     let empty_dots = Vec::new();
                     let ctx = build_render_context(&ext_vals, &design_id, &ha_vals, &empty_set, &empty_dots);
                     let images = state.images.read().await.clone();
-                    let img = renderer::render(&design.layout, &ctx, &images);
+                    let page_id = page_param.unwrap_or_else(|| design_home_page_id(&design.layout));
+                    let layout = effective_page_layout(&design.layout, &page_id).unwrap_or_else(default_layout);
+                    let img = renderer::render(&layout, &ctx, &images);
                     png_response(&img)
                 }
                 None => json_response(StatusCode::NOT_FOUND, &json!({"error": "design not found"})),
@@ -1274,7 +1600,8 @@ pub async fn handle_http_request(
                 let empty_dots = Vec::new();
                 let ctx = build_render_context(&ext_vals, design_id, &ha_vals, &empty_set, &empty_dots);
                 let images = state.images.read().await.clone();
-                let img = renderer::render(&design.layout, &ctx, &images);
+                let layout = effective_page_layout(&design.layout, &design_home_page_id(&design.layout)).unwrap_or_else(default_layout);
+                let img = renderer::render(&layout, &ctx, &images);
                 png_response(&img)
             } else {
                 json_response(StatusCode::NOT_FOUND, &json!({"error": "design not found"}))
@@ -1317,6 +1644,8 @@ pub async fn handle_http_request(
                     "name": design.name,
                     "revision": design.revision,
                     "orientation": design.layout.get("orientation").and_then(|v| v.as_str()).unwrap_or("portrait"),
+                    "pageCount": design.layout.get("pages").and_then(|p| p.as_array()).map(|a| a.len()).unwrap_or(1),
+                    "homePageId": design_home_page_id(&design.layout),
                 }));
             }
 
@@ -1404,7 +1733,7 @@ pub async fn handle_http_request(
                         layout["orientation"] = json!(orientation);
                     }
                 }
-                let normalized = validate_layout(layout).unwrap_or_else(|_| default_layout());
+                let normalized = validate_design(layout).unwrap_or_else(|_| migrate_design_to_v2(default_layout()));
 
                 let id = format!("design_{:x}", Utc::now().timestamp_micros());
                 let mut studio = state.studio.write().await;
@@ -1587,7 +1916,7 @@ fn png_response(img: &RgbImage) -> Response<Body> {
 }
 
 async fn serve_static_file(path: &Path, content_type: &str) -> Response<Body> {
-    // /static/* assets (app.js, styles.css) get a short cache lifetime so
+    // /static/* assets (js modules, styles.css) get a short cache lifetime so
     // repeat Studio loads skip the disk read + transfer; the HTML shell
     // itself is never cached, so a deploy is picked up immediately.
     let cache_control = if path.file_name().and_then(|n| n.to_str()) == Some("index.html") {
