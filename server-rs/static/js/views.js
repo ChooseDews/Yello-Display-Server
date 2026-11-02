@@ -11,7 +11,7 @@ import {
 } from "./canvas.js";
 import { rebuildFlow } from "./flow.js";
 import { setDocumentState } from "./history.js";
-import { initAgentPage } from "./agent.js";
+import { initAgentPage, tryDockAgent, placeAgent } from "./agent.js";
 
 export function pageFromPath() {
   const name = window.location.pathname.replace(/^\//, "");
@@ -19,6 +19,9 @@ export function pageFromPath() {
 }
 
 export function showPage(page, push = false) {
+  // On desktop the Agent opens as a docked right-hand column instead of a
+  // page; tryDockAgent returns false on narrow screens (normal page then).
+  if (page === "agent" && tryDockAgent()) return;
   S.currentPage = page;
   document.body.classList.toggle("route-designer", page === "designer");
   for (const name of ["designer", "devices", "designs", "settings", "about", "agent"]) {
@@ -34,6 +37,7 @@ export function showPage(page, push = false) {
   if (page === "settings") loadHomeAssistantSettings().catch((error) => toast(error.message, true));
   if (page === "about") renderAboutPage();
   if (page === "agent") initAgentPage();
+  placeAgent();
 }
 
 // The About page: project links plus the ESP32 web flasher. The firmware

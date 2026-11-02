@@ -24,18 +24,95 @@ const MAX_TOOL_ROUNDS = 10;
 let initialized = false;
 let sending = false;
 let aborter = null;
+let dockOpen = false;
+const usageTotals = { in: 0, out: 0, cost: 0 };
 const conversation = []; // OpenAI-format messages (system prompt added per request)
 
-const SYSTEM_PROMPT = `You are the agent built into Yello Studio, a designer for 240x320 (portrait) or 320x240 (landscape) ESP32 touch displays. You edit the design the user currently has open by calling tools.
+const isWide = () => window.matchMedia("(min-width: 1200px)").matches;
 
-Designs are schema v2 documents: {schemaVersion: 2, name, orientation, background, homePageId, pages: [{id, name, background, elements}], sharedElements, dataSources, actions}. Each element is {id, type, name, frame: {x, y, w, h}, style, props, visible, locked}. Coordinates are pixels on the page (portrait pages are 240 wide, 320 tall). Supported types: text, clock, external-text, button, design-link, image, color-block, ha-state, ha-toggle, script, screen (embeds another design's page), gauge, qr, shape. Shared elements render only on the pages listed in their own pages array.
+// On desktop the agent lives in a docked right-hand column: the setup and
+// chat cards are moved between the page mount and the panel mount. On
+// narrow screens the cards live on the Agent page instead.
+export function placeAgent() {
+  const docked = isWide() && dockOpen;
+  document.body.classList.toggle("agent-dock", docked);
+  const mount = $(docked ? "agent-mount-panel" : "agent-mount-page");
+  for (const id of ["agent-setup-card", "agent-chat-card"]) {
+    const card = $(id);
+    if (card && card.parentElement !== mount) mount.append(card);
+  }
+  document.querySelectorAll('[data-route="agent"]').forEach((link) => {
+    link.classList.toggle("active", docked || S.currentPage === "agent");
+  });
+}
 
-How to work:
-- Always call get_current_design first and edit the JSON it returns — its elements are the ground truth for style/props shapes (e.g. style: {color, fontSize, align, verticalAlign}; clock props: {format (strftime like "%H:%M"), timezone}; text props: {text}).
+function setDock(open) {
+  dockOpen = open;
+  placeAgent();
+}
+
+// Called from showPage: on a wide screen, toggle the dock and report that
+// the navigation was handled (no page switch). Returns false on narrow
+// screens so the normal Agent page opens.
+export function tryDockAgent() {
+  if (!isWide()) return false;
+  initAgentPage();
+  setDock(!dockOpen);
+  return true;
+}
+
+const SYSTEM_PROMPT = `You are the agent built into Yello Studio, a designer for ESP32 touch displays (240x320 portrait, 320x240 landscape). You edit the design the user has open by calling tools. The screen is small and rendered server-side to pixels, so layouts must be simple, large, and legible.
+
+## Design document (schema v2)
+{ schemaVersion: 2, name, profile: "ili9341-240x320", orientation: "portrait"|"landscape", background: "#0a0a1e", idleHomeSeconds: 0, homePageId: "<page id>", pages: [...], sharedElements: [...], dataSources: [...], actions: [...] }
+- pages: 1..50 pages, each { id, name, background, elements: [0..100 elements] }. Page ids are unique slugs; homePageId must name one of them. Portrait pages are 240 wide x 320 tall; landscape 320 x 240.
+- Element: { id (unique slug), type, name, frame: {x, y, w, h} in page pixels, style: {...}, props: {...}, visible: true, locked: false }. Elements render in array order (later = on top).
+- sharedElements: elements with an extra pages: ["pageId", ...] field; a shared element renders ONLY on the pages listed there.
+- Colors are "#rrggbb". Common style keys: color, fontSize (number), align: "left"|"center"|"right", verticalAlign: "top"|"middle"|"bottom", radius (corner radius px).
+
+## Element types (props; style beyond the common keys)
+- text: props {text, wrap}. Plain label.
+- clock: props {format (strftime, e.g. "%H:%M" or "%a %b %d"), timezone ("" = display local time)}.
+- external-text: props {sourceId (a dataSources id), wrap}. Shows fetched text.
+- color-block: style {color, radius}; no props. A filled rectangle.
+- button: props {label, actionId (an actions id, or "" for none)}. style {color = background, fontSize, radius}. Fires its HTTP action when tapped.
+- design-link: props {label, targetDesignId, targetPageId optional}. style like button. Navigates the screen to another design/page.
+- image: props {src (URL), fit: "contain"|"cover"|"stretch"}.
+- ha-state: props {entityId (e.g. "sensor.office_temperature"), attribute ("" = state), prefix, suffix, decimals, showUnit, refreshInterval (seconds), wrap}. Shows a Home Assistant entity's state, formatted.
+- ha-toggle: props {entityId (a switch/light/etc.), label, refreshInterval}. style {color = on color, offColor, fontSize, radius}. Tapping toggles the entity in Home Assistant.
+- screen: props {designId, pageId}. Embeds another design's page inside the frame (one level deep, view-only).
+- gauge: a bar. props {sourceKind: "static"|"external"|"ha", value (for static), sourceId (for external), entityId (for ha), min, max, decimals, unit, showValue, refreshInterval}. style {color = bar, trackColor, fontSize}.
+- qr: props {text (URL/text to encode)}. style {color = modules, bgColor}.
+- shape: props {shape: "rect"|"circle"|"ellipse"}. style {color, radius, outlineColor, outlineWidth}.
+- script: props {code, refreshInterval, wrap}. Runs the script language below; the most flexible element.
+
+## dataSources and actions
+- dataSources: [{ id, name, type: "http-text", url, interval (seconds, 5..86400) }] — the server fetches the URL as plain text on the interval; external-text elements and gauges (sourceKind "external") read it by sourceId.
+- actions: [{ id, name, type: "http", method: "GET"|"POST", url, body }] — fired by button elements (props.actionId) when tapped on the device.
+
+## Script language (script elements)
+A bounded, Python-like language evaluated by the server on each refresh. Indentation-based blocks, if/elif/else, for x in range(n), comparisons, and/or/not, arithmetic, f-strings (f"Temp {value:.1f}"). Variables width and height are the element's frame size in px. Output: call text(s) to set the element's text, or draw (drawing replaces the text output). Built-ins:
+- ha("sensor.x") -> the entity's state (string or number); ha("sensor.x", "battery_level") -> an attribute. Missing/error entities give "unavailable" / "unknown", so guard with number(ha(...), fallback).
+- now("%H:%M") -> local time string (strftime).
+- number(x, default), clamp(x, lo, hi), min, max, abs, round, sqrt, sin, cos, tan.
+- clear("#112233") fill background; rect(x, y, w, h, color, radius); circle(cx, cy, r, color); line(x0, y0, x1, y1, color, width); label(x, y, text, color, size, anchor) where anchor is two letters like "mm" (middle-middle), "la" (left-top) — first letter l/m/r = horizontal, second a/m/d = top/middle/baseline.
+Limits: small programs only (a few hundred nodes, bounded loops). Examples:
+  value = number(ha("sensor.battery_level"), 72)
+  clear("#18202b")
+  rect(4, 4, width - 8, height - 8, "#273447", 6)
+  rect(8, 8, (width - 16) * clamp(value, 0, 100) / 100, height - 16, "#f2c94c", 4)
+  label(width / 2, height / 2, f"{value:.0f}%", "#ffffff", 14, "mm")
+And: text(f"Office {ha('sensor.office_temperature')}°C") — note: use double quotes for the f-string and single quotes inside, JSON-escaped in the document.
+
+## Home Assistant
+HA elements and ha() read live entity states from the user's connected Home Assistant; the current entity list (id = state) is included in the context message when HA is connected. Only use entity ids from that list or already present in the design; never invent entity ids. ha-toggle works for entities in domains like light, switch, fan, cover, climate (anything with on/off).
+
+## How to work
+- Always call get_current_design first and edit the JSON it returns — it is the ground truth for this design's shapes and conventions.
 - To change the design, call set_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
 - After a successful set_design_json, call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
 - Use validate_design to check a document without applying it.
-- Keep frames inside the page, avoid overlaps unless asked, and give new elements unique ids.
+- Keep frames inside the page, avoid overlaps unless asked, give new elements unique ids, and prefer fontSize >= 12 for readable text on the small display.
 - Be concise in chat. Summarize what you changed in one or two sentences; do not paste the whole JSON back.`;
 
 const TOOLS = [
@@ -268,13 +345,67 @@ function addMessage(role, text = "") {
   return el;
 }
 
-function addToolChip(name, ok) {
+// One tool call in the transcript: a one-line chip normally; in dev mode
+// the arguments and result JSON show underneath it.
+function addToolEntry(name, argsJson) {
   const box = $("agent-messages");
-  const el = document.createElement("div");
-  el.className = "tool-chip";
-  el.textContent = `${ok ? "✓" : "✕"} ${name}`;
-  box.append(el);
+  const wrap = document.createElement("div");
+  wrap.className = "tool-entry";
+  const chip = document.createElement("div");
+  chip.className = "tool-chip";
+  chip.textContent = `… ${name}`;
+  const args = document.createElement("pre");
+  args.className = "tool-json";
+  let prettyArgs = argsJson || "{}";
+  try {
+    prettyArgs = JSON.stringify(JSON.parse(argsJson || "{}"), null, 2);
+  } catch { /* keep raw */ }
+  args.textContent = prettyArgs.length > 4000 ? `${prettyArgs.slice(0, 4000)}…` : prettyArgs;
+  const result = document.createElement("pre");
+  result.className = "tool-json";
+  wrap.append(chip, args, result);
+  box.append(wrap);
   box.scrollTop = box.scrollHeight;
+  return {
+    finish(resultObj, ok) {
+      chip.textContent = `${ok ? "✓" : "✕"} ${name}`;
+      const pretty = JSON.stringify(resultObj, null, 2) || "";
+      result.textContent = pretty.length > 4000 ? `${pretty.slice(0, 4000)}…` : pretty;
+    },
+  };
+}
+
+// An assistant turn: an optional thinking block (dev mode only) above the
+// streamed bubble.
+function addAssistantTurn() {
+  const box = $("agent-messages");
+  const row = document.createElement("div");
+  row.className = "msg-row";
+  const thinking = document.createElement("details");
+  thinking.className = "thinking";
+  const summary = document.createElement("summary");
+  summary.textContent = "Thinking";
+  const thinkingBody = document.createElement("div");
+  thinkingBody.className = "thinking-body";
+  thinking.append(summary, thinkingBody);
+  const bubble = document.createElement("div");
+  bubble.className = "msg assistant";
+  row.append(thinking, bubble);
+  box.append(row);
+  box.scrollTop = box.scrollHeight;
+  return { bubble, thinkingBody };
+}
+
+function renderUsage() {
+  const el = $("agent-usage");
+  if (!el) return;
+  if (!usageTotals.in && !usageTotals.out) {
+    el.textContent = "";
+    return;
+  }
+  const fmt = (n) => n.toLocaleString("en-US");
+  el.textContent = `Session usage: ${fmt(usageTotals.in)} in · ${fmt(usageTotals.out)} out` +
+    (usageTotals.cost ? ` · $${usageTotals.cost.toFixed(4)}` : "");
 }
 
 // ---------- OpenRouter ----------
@@ -329,6 +460,7 @@ async function streamChat(messages) {
       messages,
       tools: TOOLS,
       stream: true,
+      usage: { include: true },
     }),
   });
   if (!response.ok) {
@@ -339,8 +471,10 @@ async function streamChat(messages) {
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
+  let reasoning = "";
+  let usage = null;
   const toolCalls = new Map();
-  let bubble = null;
+  let turn = null;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -358,11 +492,19 @@ async function streamChat(messages) {
       } catch {
         continue;
       }
+      if (chunk.usage) usage = chunk.usage;
       const delta = chunk.choices?.[0]?.delta || {};
+      const reasoningDelta = delta.reasoning || delta.reasoning_content || "";
+      if (reasoningDelta) {
+        reasoning += reasoningDelta;
+        if (!turn) turn = addAssistantTurn();
+        turn.thinkingBody.textContent = reasoning;
+        $("agent-messages").scrollTop = $("agent-messages").scrollHeight;
+      }
       if (delta.content) {
         content += delta.content;
-        if (!bubble) bubble = addMessage("assistant", "");
-        bubble.innerHTML = markdownLite(content);
+        if (!turn) turn = addAssistantTurn();
+        turn.bubble.innerHTML = markdownLite(content);
         $("agent-messages").scrollTop = $("agent-messages").scrollHeight;
       }
       for (const call of delta.tool_calls || []) {
@@ -374,7 +516,7 @@ async function streamChat(messages) {
       }
     }
   }
-  return { content, toolCalls: [...toolCalls.values()] };
+  return { content, toolCalls: [...toolCalls.values()], usage };
 }
 
 async function sendAgentMessage() {
@@ -399,15 +541,24 @@ async function sendAgentMessage() {
   conversation.push({ role: "user", content: text });
   try {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-      const context = {
-        role: "system",
-        content: `Current context: design "${S.layout?.name || S.currentDesignId}" (id ${S.currentDesignId}) is open in the editor${S.dirty ? " with unsaved changes" : ""}. ${S.studio.screens.length} screen(s) known, ${S.studio.screens.filter((s) => s.connected).length} connected.`,
-      };
-      const { content, toolCalls } = await streamChat([
+      let contextText = `Current context: design "${S.layout?.name || S.currentDesignId}" (id ${S.currentDesignId}) is open in the editor${S.dirty ? " with unsaved changes" : ""}. ${S.studio.screens.length} screen(s) known, ${S.studio.screens.filter((s) => s.connected).length} connected.`;
+      const entities = S.homeAssistant?.entities || [];
+      if (entities.length) {
+        const list = entities.slice(0, 80).map((e) => `${e.entityId} = ${e.state}${e.unit ? ` ${e.unit}` : ""}`).join("; ");
+        contextText += ` Home Assistant entities: ${list}${entities.length > 80 ? " (list truncated)" : ""}.`;
+      }
+      const context = { role: "system", content: contextText };
+      const { content, toolCalls, usage } = await streamChat([
         { role: "system", content: SYSTEM_PROMPT },
         context,
         ...conversation,
       ]);
+      if (usage) {
+        usageTotals.in += usage.prompt_tokens || 0;
+        usageTotals.out += usage.completion_tokens || 0;
+        usageTotals.cost += usage.cost || 0;
+        renderUsage();
+      }
       const assistantMessage = { role: "assistant", content: content || null };
       if (toolCalls.length) {
         assistantMessage.tool_calls = toolCalls.map((call) => ({
@@ -419,9 +570,10 @@ async function sendAgentMessage() {
       conversation.push(assistantMessage);
       if (!toolCalls.length) break;
       for (const call of toolCalls) {
+        const entry = addToolEntry(call.name, call.arguments);
         const result = await runTool(call.name, call.arguments);
         const failed = Boolean(result && (result.error || result.applied === false || result.valid === false));
-        addToolChip(call.name, !failed);
+        entry.finish(result, !failed);
         conversation.push({
           role: "tool",
           tool_call_id: call.id,
@@ -461,9 +613,28 @@ export function initAgentPage() {
   $("agent-stop").onclick = () => aborter?.abort();
   $("agent-clear").onclick = () => {
     conversation.length = 0;
+    usageTotals.in = 0;
+    usageTotals.out = 0;
+    usageTotals.cost = 0;
+    renderUsage();
     $("agent-messages").replaceChildren();
     greet();
   };
+  const devToggle = $("agent-dev");
+  const applyDev = () => $("agent-chat-card").classList.toggle("agent-dev", devToggle.checked);
+  devToggle.checked = localStorage.getItem("yello-agent-dev") === "1";
+  applyDev();
+  devToggle.onchange = () => {
+    localStorage.setItem("yello-agent-dev", devToggle.checked ? "1" : "0");
+    applyDev();
+  };
+  $("agent-panel-close").onclick = () => setDock(false);
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(placeAgent, 150);
+  });
+  placeAgent();
   $("agent-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();

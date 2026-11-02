@@ -271,7 +271,8 @@
     <div class="page-heading">
       <div><span class="eyebrow">Studio agent</span><h1>Agent</h1><p>Chat with a model that edits the open design for you.</p></div>
     </div>
-    <section class="settings-card">
+    <div id="agent-mount-page" class="agent-mount-page">
+    <section class="settings-card" id="agent-setup-card">
       <div class="settings-card-heading">
         <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-bot"></use></svg></div>
         <div><h2>OpenRouter</h2><p>Your key stays in this browser — sent only to OpenRouter.</p></div>
@@ -286,7 +287,11 @@
         <span class="agent-model-tools"><button id="agent-models-refresh" type="button" class="assign-button">Refresh</button> <span id="agent-model-state" class="subtle"></span></span>
       </div>
     </section>
-    <section class="settings-card agent-chat-card">
+    <section class="settings-card agent-chat-card" id="agent-chat-card">
+      <div class="agent-chat-head">
+        <span class="agent-chat-title">Chat</span>
+        <label class="agent-dev-toggle"><input type="checkbox" id="agent-dev"> Dev mode</label>
+      </div>
       <div id="agent-messages" class="agent-messages"></div>
       <div class="agent-composer">
         <textarea id="agent-input" rows="2" placeholder="Ask the agent to change the design… (Enter to send)"></textarea>
@@ -295,9 +300,19 @@
           <button id="agent-stop" type="button" class="danger-button hidden">Stop</button>
           <button id="agent-send" type="button" class="primary-button"><svg class="ic" aria-hidden="true"><use href="#i-send"></use></svg> Send</button>
         </div>
+        <div id="agent-usage" class="agent-usage"></div>
       </div>
     </section>
+    </div>
   </main>
+
+  <aside id="agent-panel" class="agent-panel" aria-label="Agent panel">
+    <div class="agent-panel-head">
+      <svg class="ic" aria-hidden="true"><use href="#i-bot"></use></svg> Agent
+      <button id="agent-panel-close" type="button" class="icon-button" aria-label="Close agent panel"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </div>
+    <div id="agent-mount-panel" class="agent-mount-panel"></div>
+  </aside>
 
   <main id="about-page" class="management-page hidden">
     <div class="page-heading">
