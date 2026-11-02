@@ -406,6 +406,8 @@ function markdownLite(text) {
 }
 
 function addMessage(role, text = "") {
+  // Never render an empty assistant bubble.
+  if (role === "assistant" && !text.trim()) return null;
   const box = $("agent-messages");
   const el = document.createElement("div");
   el.className = `msg ${role}`;
@@ -454,7 +456,9 @@ function addToolEntry(name, argsJson) {
 }
 
 // An assistant turn: an optional thinking block (dev mode only) above the
-// streamed bubble.
+// streamed bubble. The bubble stays out of the DOM until the turn actually
+// has text — tool-only and thinking-only rounds must not leave an empty
+// assistant pill behind. setContent("") removes it again.
 function addAssistantTurn() {
   const box = $("agent-messages");
   const row = document.createElement("div");
@@ -468,10 +472,30 @@ function addAssistantTurn() {
   thinking.append(summary, thinkingBody);
   const bubble = document.createElement("div");
   bubble.className = "msg assistant";
-  row.append(thinking, bubble);
   box.append(row);
   box.scrollTop = box.scrollHeight;
-  return { bubble, thinkingBody };
+  return {
+    bubble,
+    thinkingBody,
+    row,
+    setThinking(text) {
+      if (!text) return;
+      if (!thinking.isConnected) row.insertBefore(thinking, bubble.isConnected ? bubble : null);
+      thinkingBody.textContent = text;
+    },
+    setContent(text) {
+      if (text) {
+        if (!bubble.isConnected) row.append(bubble);
+        bubble.innerHTML = markdownLite(text);
+      } else {
+        bubble.remove();
+      }
+    },
+    /** Drop the whole row if the turn produced neither text nor thinking. */
+    finish() {
+      if (!bubble.isConnected && !thinking.isConnected) row.remove();
+    },
+  };
 }
 
 function renderUsage() {
@@ -482,14 +506,172 @@ function renderUsage() {
     return;
   }
   const fmt = (n) => n.toLocaleString("en-US");
-  el.textContent = `Session usage: ${fmt(usageTotals.in)} in · ${fmt(usageTotals.out)} out` +
+  el.textContent = `${fmt(usageTotals.in)} in · ${fmt(usageTotals.out)} out` +
     (usageTotals.cost ? ` · $${usageTotals.cost.toFixed(4)}` : "");
+  el.title = "Session token usage";
 }
 
 // ---------- OpenRouter ----------
 
 function apiKey() {
   return localStorage.getItem(KEY_STORAGE) || "";
+}
+
+// ---------- model picker ----------
+// Only vision-capable models are offered: view_screen hands the model a
+// rendered image, so a text-only model cannot do the job. Favorites are
+// pinned to the top of the picker and stored in this browser only.
+
+const FAV_STORAGE = "yello-agent-fav-models";
+let visionModels = [];
+let modelsLoadOk = false;
+let setupOpen = false;
+
+function loadFavorites() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(FAV_STORAGE) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveFavorites(favs) {
+  localStorage.setItem(FAV_STORAGE, JSON.stringify([...favs]));
+}
+
+/** Vision = the model accepts image input. OpenRouter describes this in
+ *  architecture.input_modalities / modality; endpoints that describe
+ *  nothing are trusted (the mock and small compatible APIs). */
+function isVisionModel(model) {
+  const inputs = model.architecture?.input_modalities;
+  if (Array.isArray(inputs)) return inputs.includes("image");
+  const modality = model.architecture?.modality;
+  if (typeof modality === "string") return modality.split("->")[0].includes("image");
+  return true;
+}
+
+function modelPriceText(model) {
+  const inPrice = Number(model.pricing?.prompt || 0) * 1e6;
+  const outPrice = Number(model.pricing?.completion || 0) * 1e6;
+  if (inPrice === 0 && outPrice === 0) return "free";
+  return `$${inPrice.toFixed(2)}/$${outPrice.toFixed(2)} per 1M`;
+}
+
+function modelMetaText(model) {
+  const bits = [model.id, modelPriceText(model)];
+  const ctx = Number(model.context_length || model.top_provider?.context_length || 0);
+  if (ctx >= 1000) bits.push(`${Math.round(ctx / 1000)}K ctx`);
+  return bits.join(" · ");
+}
+
+function selectedModel() {
+  return visionModels.find((m) => m.id === $("agent-model").value) || null;
+}
+
+function syncModelButton() {
+  const model = selectedModel();
+  $("agent-model-label").textContent = model ? (model.name || model.id) : "Select a model";
+  $("agent-model-button").title = model ? model.id : "Choose a model";
+}
+
+function selectModel(id) {
+  const select = $("agent-model");
+  if (![...select.options].some((o) => o.value === id)) return;
+  select.value = id;
+  localStorage.setItem(MODEL_STORAGE, id);
+  syncModelButton();
+  renderModelList();
+}
+
+function renderModelList() {
+  const list = $("agent-model-list");
+  if (!list) return;
+  const query = ($("agent-model-search").value || "").trim().toLowerCase();
+  const favs = loadFavorites();
+  const matches = visionModels.filter((m) => !query || `${m.name || ""} ${m.id}`.toLowerCase().includes(query));
+  const current = $("agent-model").value;
+  list.replaceChildren();
+  const addGroup = (title, models) => {
+    if (!models.length) return;
+    const head = document.createElement("div");
+    head.className = "agent-model-group";
+    head.textContent = title;
+    list.append(head);
+    for (const model of models) {
+      const row = document.createElement("div");
+      row.className = `agent-model-row${model.id === current ? " selected" : ""}`;
+      const pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "agent-model-pick";
+      pick.setAttribute("role", "option");
+      pick.setAttribute("aria-selected", String(model.id === current));
+      const name = document.createElement("span");
+      name.className = "agent-model-name";
+      name.textContent = model.name || model.id;
+      const meta = document.createElement("span");
+      meta.className = "agent-model-meta";
+      meta.textContent = modelMetaText(model);
+      pick.append(name, meta);
+      pick.onclick = () => {
+        selectModel(model.id);
+        setModelDropdown(false);
+      };
+      const fav = document.createElement("button");
+      fav.type = "button";
+      fav.className = `agent-model-fav${favs.has(model.id) ? " is-fav" : ""}`;
+      fav.title = favs.has(model.id) ? "Remove from favorites" : "Add to favorites";
+      fav.setAttribute("aria-label", fav.title);
+      fav.setAttribute("aria-pressed", String(favs.has(model.id)));
+      fav.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-star"></use></svg>';
+      fav.onclick = () => {
+        const next = loadFavorites();
+        if (next.has(model.id)) next.delete(model.id);
+        else next.add(model.id);
+        saveFavorites(next);
+        renderModelList();
+      };
+      row.append(pick, fav);
+      list.append(row);
+    }
+  };
+  addGroup("Favorites", matches.filter((m) => favs.has(m.id)));
+  addGroup("All models", matches.filter((m) => !favs.has(m.id)));
+  if (!matches.length) {
+    const empty = document.createElement("div");
+    empty.className = "agent-model-empty";
+    empty.textContent = visionModels.length ? `No vision models match “${query}”.` : "No models loaded yet.";
+    list.append(empty);
+  }
+  $("agent-model-count").textContent = `${visionModels.length} vision models`;
+}
+
+function setModelDropdown(open) {
+  const dropdown = $("agent-model-dropdown");
+  dropdown.classList.toggle("hidden", !open);
+  $("agent-model-button").setAttribute("aria-expanded", String(open));
+  if (open) {
+    renderModelList();
+    $("agent-model-search").focus();
+  }
+}
+
+// ---------- provider bar ----------
+// Once a key is saved and the model list loads with it, the provider
+// section collapses to a one-line "Connected" bar; the gear reopens it.
+
+function updateProviderUi() {
+  const hasKey = Boolean(apiKey());
+  const connected = hasKey && modelsLoadOk;
+  $("agent-provider-dot").classList.toggle("connected", connected);
+  const status = $("agent-provider-status");
+  status.textContent = connected ? "Connected" : hasKey ? "Key saved" : "Not connected";
+  status.classList.toggle("connected", connected);
+  $("agent-key-state").textContent = hasKey ? "Key saved in this browser" : "No key saved";
+  const open = setupOpen || !connected;
+  $("agent-setup-body").style.display = open ? "" : "none";
+  $("agent-settings-toggle").setAttribute("aria-expanded", String(open));
+  const baseHost = API_BASE.replace(/^https?:\/\//, "").split("/")[0];
+  $("agent-provider-name").textContent = baseHost.includes("openrouter") ? "OpenRouter" : baseHost;
 }
 
 async function loadModels() {
@@ -502,26 +684,35 @@ async function loadModels() {
     const response = await fetch(`${API_BASE}/models`, { headers });
     if (!response.ok) throw new Error(`OpenRouter returned ${response.status}`);
     const { data } = await response.json();
-    const stored = localStorage.getItem(MODEL_STORAGE);
+    visionModels = (data || [])
+      .filter(isVisionModel)
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
     select.replaceChildren();
-    for (const model of data.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))) {
+    for (const model of visionModels) {
       const option = document.createElement("option");
       option.value = model.id;
-      const inPrice = Number(model.pricing?.prompt || 0) * 1e6;
-      const outPrice = Number(model.pricing?.completion || 0) * 1e6;
-      option.textContent = inPrice === 0 && outPrice === 0
-        ? `${model.name || model.id} · free`
-        : `${model.name || model.id} · $${inPrice.toFixed(2)}/$${outPrice.toFixed(2)} per 1M`;
+      option.textContent = `${model.name || model.id} · ${modelPriceText(model)}`;
       select.append(option);
     }
-    if (stored && [...select.options].some((o) => o.value === stored)) select.value = stored;
-    else if ([...select.options].some((o) => o.value.includes("claude-sonnet"))) {
-      select.value = [...select.options].find((o) => o.value.includes("claude-sonnet")).value;
+    const stored = localStorage.getItem(MODEL_STORAGE);
+    const favs = loadFavorites();
+    const firstFav = visionModels.find((m) => favs.has(m.id));
+    if (stored && visionModels.some((m) => m.id === stored)) select.value = stored;
+    else if (firstFav) select.value = firstFav.id;
+    else {
+      const sonnet = visionModels.find((m) => m.id.includes("claude-sonnet"));
+      if (sonnet) select.value = sonnet.id;
     }
-    status.textContent = `${data.length} models`;
+    if (select.value) localStorage.setItem(MODEL_STORAGE, select.value);
+    modelsLoadOk = true;
+    status.textContent = `${visionModels.length} vision models`;
   } catch (error) {
+    modelsLoadOk = false;
     status.textContent = `Could not load models: ${error.message}`;
   }
+  syncModelButton();
+  renderModelList();
+  updateProviderUi();
 }
 
 async function streamChat(messages) {
@@ -576,13 +767,13 @@ async function streamChat(messages) {
       if (reasoningDelta) {
         reasoning += reasoningDelta;
         if (!turn) turn = addAssistantTurn();
-        turn.thinkingBody.textContent = reasoning;
+        turn.setThinking(reasoning);
         $("agent-messages").scrollTop = $("agent-messages").scrollHeight;
       }
       if (delta.content) {
         content += delta.content;
         if (!turn) turn = addAssistantTurn();
-        turn.bubble.innerHTML = markdownLite(content);
+        turn.setContent(content);
         $("agent-messages").scrollTop = $("agent-messages").scrollHeight;
       }
       for (const call of delta.tool_calls || []) {
@@ -594,6 +785,7 @@ async function streamChat(messages) {
       }
     }
   }
+  if (turn) turn.finish();
   return { content, reasoning, toolCalls: [...toolCalls.values()], usage };
 }
 
@@ -699,8 +891,9 @@ function renderConversationDom() {
     } else if (message.role === "assistant") {
       if (message.content || message._reasoning) {
         const turn = addAssistantTurn();
-        if (message._reasoning) turn.thinkingBody.textContent = message._reasoning;
-        if (message.content) turn.bubble.innerHTML = markdownLite(message.content);
+        if (message._reasoning) turn.setThinking(message._reasoning);
+        if (message.content) turn.setContent(message.content);
+        turn.finish();
       }
       for (const call of message.tool_calls || []) {
         const toolMessage = conversation
@@ -752,8 +945,10 @@ async function restoreLastChat() {
 
 function setHistoryOpen(open) {
   $("agent-history-view").classList.toggle("hidden", !open);
+  $("agent-system-prompt")?.classList.toggle("hidden", open);
   $("agent-messages").classList.toggle("hidden", open);
   document.querySelector("#agent-chat-card .agent-composer")?.classList.toggle("hidden", open);
+  document.querySelector("#agent-chat-card .agent-statusbar")?.classList.toggle("hidden", open);
   if (open) renderHistoryList();
 }
 
@@ -822,7 +1017,7 @@ async function sendAgentMessage() {
   const text = input.value.trim();
   if (!text || sending) return;
   if (!apiKey()) {
-    addMessage("assistant", "Add your OpenRouter API key above first — it stays in this browser and is only sent to OpenRouter.");
+    addMessage("assistant", "Add your OpenRouter API key first — tap the gear on the OpenRouter bar above. It stays in this browser and is only sent to OpenRouter.");
     return;
   }
   if (!$("agent-model").value) {
@@ -831,6 +1026,7 @@ async function sendAgentMessage() {
   }
   localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
   input.value = "";
+  input.style.height = "auto";
   sending = true;
   $("agent-send").disabled = true;
   $("agent-stop").classList.remove("hidden");
@@ -921,25 +1117,48 @@ export function initAgentPage() {
     const value = keyInput.value.trim();
     if (value) localStorage.setItem(KEY_STORAGE, value);
     else localStorage.removeItem(KEY_STORAGE);
-    $("agent-key-state").textContent = value ? "Key saved in this browser" : "No key saved";
     toast(value ? "OpenRouter key saved in this browser" : "OpenRouter key cleared");
+    setupOpen = false;
+    updateProviderUi();
     loadModels();
   };
+  $("agent-settings-toggle").onclick = () => {
+    setupOpen = $("agent-setup-body").style.display === "none";
+    updateProviderUi();
+  };
   $("agent-models-refresh").onclick = loadModels;
-  $("agent-model").onchange = () => localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
+  $("agent-model").onchange = () => {
+    localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
+    syncModelButton();
+  };
+  $("agent-model-button").onclick = (event) => {
+    event.stopPropagation();
+    setModelDropdown($("agent-model-dropdown").classList.contains("hidden"));
+  };
+  $("agent-model-dropdown").onclick = (event) => event.stopPropagation();
+  $("agent-model-search").addEventListener("input", renderModelList);
+  $("agent-model-search").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setModelDropdown(false);
+  });
+  document.addEventListener("click", () => setModelDropdown(false));
   $("agent-send").onclick = sendAgentMessage;
   $("agent-stop").onclick = () => aborter?.abort();
   $("agent-clear").onclick = () => startNewChat();
   $("agent-history").onclick = () => setHistoryOpen(true);
   $("agent-history-close").onclick = () => setHistoryOpen(false);
-  const devToggle = $("agent-dev");
-  const applyDev = () => $("agent-chat-card").classList.toggle("agent-dev", devToggle.checked);
-  devToggle.checked = localStorage.getItem("yello-agent-dev") === "1";
-  applyDev();
-  devToggle.onchange = () => {
-    localStorage.setItem("yello-agent-dev", devToggle.checked ? "1" : "0");
+  $("agent-system-prompt-body").textContent = SYSTEM_PROMPT;
+  const devButton = $("agent-dev");
+  const applyDev = () => {
+    const on = localStorage.getItem("yello-agent-dev") === "1";
+    $("agent-chat-card").classList.toggle("agent-dev", on);
+    devButton.setAttribute("aria-pressed", String(on));
+  };
+  devButton.onclick = () => {
+    const on = localStorage.getItem("yello-agent-dev") === "1";
+    localStorage.setItem("yello-agent-dev", on ? "0" : "1");
     applyDev();
   };
+  applyDev();
   $("agent-panel-close").onclick = () => setDock(false);
   let resizeTimer = null;
   window.addEventListener("resize", () => {
@@ -947,7 +1166,14 @@ export function initAgentPage() {
     resizeTimer = setTimeout(placeAgent, 150);
   });
   placeAgent();
-  $("agent-input").addEventListener("keydown", (event) => {
+  const input = $("agent-input");
+  const growInput = () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+  };
+  input.addEventListener("input", growInput);
+  growInput();
+  input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       sendAgentMessage();
