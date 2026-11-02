@@ -230,3 +230,77 @@ async fn test_websocket_stream_and_zones() {
 
     assert!(received_zones >= 5);
 }
+
+#[tokio::test]
+async fn test_write_atomic_replaces_content() {
+    let dir = std::env::temp_dir().join(format!("yello-atomic-{}", std::process::id()));
+    let path = dir.join("studio.json");
+    write_atomic(&path, b"{\"v\":1}").await.unwrap();
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "{\"v\":1}");
+    write_atomic(&path, b"{\"v\":2}").await.unwrap();
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "{\"v\":2}");
+    // No temp file is left behind after a successful save.
+    assert!(!dir.join("studio.json.tmp").exists());
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+}
+
+#[tokio::test]
+async fn test_live_touch_endpoint() {
+    let state = Arc::new(AppState::new(
+        PathBuf::from("/tmp/test_studio_live.json"),
+        PathBuf::from("/tmp/test_secrets_live.json"),
+        static_dir(),
+    ));
+
+    // Tap on the empty background of the default layout: accepted, recorded
+    // in the design's live preview state, and no navigation is reported.
+    let body = json!({ "layout": default_layout(), "x": 4, "y": 4, "touchType": "down" });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/live-touch?design=default")
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = handle_http_request(req, state.clone()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+    let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(val["status"], "ok");
+    assert!(val.get("navigateTo").is_none());
+    {
+        let live_states = state.live_states.read().await;
+        let ls = live_states.get("default").expect("live state recorded");
+        assert_eq!(ls.dots.len(), 1);
+    }
+
+    // Tap on a full-screen design-link: the Studio is told where to go.
+    let mut layout = default_layout();
+    layout["elements"] = json!([{
+        "id": "link1", "type": "design-link", "name": "Open", "visible": true, "locked": false,
+        "frame": { "x": 0, "y": 0, "w": 240, "h": 320 },
+        "style": { "color": "#6b9cff", "fontSize": 16, "radius": 8 },
+        "props": { "label": "Open screen", "targetDesignId": "default" }
+    }]);
+    let body = json!({ "layout": layout, "x": 120, "y": 160, "touchType": "down" });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/live-touch?design=default")
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = handle_http_request(req, state.clone()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+    let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(val["navigateTo"], "default");
+
+    // A body without a layout is a 400, not a panic.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/live-touch?design=default")
+        .header("Content-Type", "application/json")
+        .body(Body::from(json!({ "x": 1, "y": 1 }).to_string()))
+        .unwrap();
+    let resp = handle_http_request(req, state.clone()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

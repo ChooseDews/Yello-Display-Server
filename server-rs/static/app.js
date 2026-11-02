@@ -1071,7 +1071,7 @@ async function refreshPreview() {
     });
     if (!response.ok) {
       const result = await response.json();
-      throw new Error(result.errors?.[0]?.message || `Preview failed (${response.status})`);
+      throw new Error((result.details || result.errors)?.[0]?.message || `Preview failed (${response.status})`);
     }
     const blob = await response.blob();
     const nextUrl = URL.createObjectURL(blob);
@@ -1136,7 +1136,7 @@ async function applyCodeLayout() {
     });
     const result = await response.json();
     if (!response.ok) {
-      showCodeErrors(result.errors || [{ path: "$", message: result.error || "Layout validation failed" }]);
+      showCodeErrors(result.details || result.errors || [{ path: "$", message: result.error || "Layout validation failed" }]);
       setCodeEditorState("Layout validation failed", "invalid");
       return false;
     }
@@ -1264,7 +1264,7 @@ async function saveLayout() {
       });
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.errors?.map((item) => `${item.path}: ${item.message}`).join("\n") || `Save failed for ${designId}`);
+        throw new Error((result.details || result.errors)?.map((item) => `${item.path}: ${item.message}`).join("\n") || `Save failed for ${designId}`);
       }
       designRevisions.set(designId, result.revision);
       flowDirty.delete(designId);

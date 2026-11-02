@@ -34,7 +34,7 @@ pub use server::{
     wanted_image_sources, decode_image_bytes,
     EXTERNAL_FETCH_TIMEOUT_S, DOT_LIFETIME_S, BUTTON_FLASH_S, IMAGE_FETCH_RETRY_S,
     push_frame, push_design, design_id_for_session, handle_http_request, handle_device_ws,
-    start_background_tasks,
+    start_background_tasks, write_atomic,
 };
 
 pub use renderer::{

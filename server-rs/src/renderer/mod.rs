@@ -21,16 +21,30 @@ pub const DOT_RADIUS: i32 = 10;
 pub const FONT_PATH: &str = "renderer/LiberationSans-Bold.ttf";
 const BUNDLED_FONT_BYTES: &[u8] = include_bytes!("LiberationSans-Bold.ttf");
 
-fn load_font_bytes() -> Option<Vec<u8>> {
-    if let Ok(path) = std::env::var("YELLO_FONT_PATH") {
-        if !path.is_empty() {
-            match std::fs::read(&path) {
-                Ok(bytes) => return Some(bytes),
-                Err(e) => eprintln!("YELLO_FONT_PATH='{path}' unreadable ({e}); using bundled Liberation Sans Bold"),
+/// Parse the render font exactly once. Previously every text element of
+/// every frame re-copied the 415 KB bundled font and re-parsed it, which
+/// dominated the 1 Hz render tick. The override path leaks its bytes once
+/// so the `FontRef` can hold them for the process lifetime.
+fn font_ref() -> Option<FontRef<'static>> {
+    static FONT: std::sync::OnceLock<Option<FontRef<'static>>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| {
+        if let Ok(path) = std::env::var("YELLO_FONT_PATH") {
+            if !path.is_empty() {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+                        if let Ok(font) = FontRef::try_from_slice(leaked) {
+                            return Some(font);
+                        }
+                        eprintln!("YELLO_FONT_PATH='{path}' is not a usable font; using bundled Liberation Sans Bold");
+                    }
+                    Err(e) => eprintln!("YELLO_FONT_PATH='{path}' unreadable ({e}); using bundled Liberation Sans Bold"),
+                }
             }
         }
-    }
-    Some(BUNDLED_FONT_BYTES.to_vec())
+        FontRef::try_from_slice(BUNDLED_FONT_BYTES).ok()
+    })
+    .clone()
 }
 
 pub fn parse_color(val: &Value, default: (u8, u8, u8)) -> (u8, u8, u8) {
@@ -222,8 +236,7 @@ fn draw_truetype_text(
     color: (u8, u8, u8),
     wrap: bool,
 ) -> Option<RgbaImage> {
-    let font_data = load_font_bytes()?;
-    let font = FontRef::try_from_slice(&font_data).ok()?;
+    let font = font_ref()?;
     let font = PxScaleFont {
         font,
         scale: PxScale::from(font_size as f32),

@@ -59,6 +59,28 @@ fn in_flight_lock(set: &Arc<std::sync::Mutex<HashSet<String>>>) -> std::sync::Mu
     set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Write a file atomically: serialize to a sibling temp file, fsync, then
+/// rename over the target. A crash mid-save can no longer truncate the
+/// only copy of the studio designs or the HA credentials (the README's
+/// "saves by atomic rename" contract).
+pub async fn write_atomic(path: &Path, content: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+    }
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("yello-data")
+    ));
+    tokio::fs::write(&tmp, content).await.map_err(|e| e.to_string())?;
+    if let Ok(file) = tokio::fs::File::open(&tmp).await {
+        let _ = file.sync_all().await;
+    }
+    tokio::fs::rename(&tmp, path).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Decode fetched image bytes into a cacheable RGB image. The header is
 /// inspected first so oversized images are rejected before the full
 /// (potentially huge) pixel buffer is allocated — same flow as PIL's
@@ -254,12 +276,7 @@ impl AppState {
             }
         });
         let content = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
-        if let Some(parent) = self.secrets_path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        tokio::fs::write(&self.secrets_path, content)
-            .await
-            .map_err(|e| e.to_string())?;
+        write_atomic(&self.secrets_path, content.as_bytes()).await?;
         let mut client = self.ha_client.write().await;
         *client = HaClient::new(url, token);
         Ok(())
@@ -323,10 +340,9 @@ impl AppState {
     pub async fn save_studio_file(&self) {
         let studio = self.studio.read().await;
         if let Ok(content) = serde_json::to_string_pretty(&*studio) {
-            if let Some(parent) = self.studio_path.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
+            if let Err(e) = write_atomic(&self.studio_path, content.as_bytes()).await {
+                eprintln!("failed to save studio file {}: {e}", self.studio_path.display());
             }
-            let _ = tokio::fs::write(&self.studio_path, content).await;
         }
     }
 }
@@ -829,19 +845,25 @@ pub async fn handle_device_ws(
         }
     });
 
-    // Register session
+    // Register session; a reconnect also refreshes last_seen (it previously
+    // stayed at the first-ever connection forever).
     {
         let mut studio = state.studio.write().await;
-        if !studio.screens.contains_key(&device_id) {
-            studio.screens.insert(
-                device_id.clone(),
-                Screen {
-                    id: device_id.clone(),
-                    name: format!("Yello {}", &device_id[device_id.len().saturating_sub(6)..]),
-                    design_id: DEFAULT_DESIGN_ID.to_string(),
-                    last_seen: Utc::now().to_rfc3339(),
-                },
-            );
+        match studio.screens.get_mut(&device_id) {
+            Some(screen) => {
+                screen.last_seen = Utc::now().to_rfc3339();
+            }
+            None => {
+                studio.screens.insert(
+                    device_id.clone(),
+                    Screen {
+                        id: device_id.clone(),
+                        name: format!("Yello {}", &device_id[device_id.len().saturating_sub(6)..]),
+                        design_id: DEFAULT_DESIGN_ID.to_string(),
+                        last_seen: Utc::now().to_rfc3339(),
+                    },
+                );
+            }
         }
     }
 
@@ -927,6 +949,59 @@ pub async fn handle_device_ws(
     }
 }
 
+/// Side effects of pressing an interactive element: fire a `button`
+/// element's HTTP action or toggle an `ha-toggle` element's entity.
+/// Returns the target design ID for `design-link` elements so the caller
+/// applies the navigation in its own context (device session vs Studio
+/// live preview). Shared by the device touch path and /api/live-touch.
+async fn fire_element_action(state: &Arc<AppState>, layout: &Value, hit: &Value) -> Option<String> {
+    let elem_type = hit.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let props = hit.get("props").unwrap_or(&Value::Null);
+    match elem_type {
+        "button" => {
+            if let Some(action) = renderer::resolve_button_action(layout, hit) {
+                let url = action.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let method = action.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+                let body = action.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                if !url.is_empty() {
+                    let client = state.safe_http.clone();
+                    let url_s = url.to_string();
+                    let method_s = method.to_string();
+                    let body_s = body.to_string();
+                    tokio::spawn(async move {
+                        let _ = client.fetch_bytes_with_method(&url_s, MAX_EXTERNAL_BYTES, &method_s, Some(&body_s)).await;
+                    });
+                }
+            }
+            None
+        }
+        "design-link" => Some(
+            props
+                .get("targetDesignId")
+                .and_then(|v| v.as_str())
+                .unwrap_or(DEFAULT_DESIGN_ID)
+                .to_string(),
+        ),
+        "ha-toggle" => {
+            let entity_id = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
+            if !entity_id.is_empty() {
+                let client = state.ha_client.read().await.clone();
+                let eid = entity_id.to_string();
+                let st = state.clone();
+                tokio::spawn(async move {
+                    if client.toggle(&eid).await.is_ok() {
+                        if let Ok(new_state) = client.get_state(&eid).await {
+                            st.ha_values.write().await.insert(eid, new_state);
+                        }
+                    }
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: i32) {
     let (_design_id, layout) = {
         let studio = state.studio.read().await;
@@ -950,8 +1025,6 @@ async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: 
 
     if let Some(hit) = renderer::hit_test_buttons(&layout, x, y) {
         let elem_id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let elem_type = hit.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let props = hit.get("props").unwrap_or(&Value::Null);
 
         // Visual flash feedback
         {
@@ -975,46 +1048,11 @@ async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: 
             let _ = push_frame(&st, &d_id, false).await;
         });
 
-        match elem_type {
-            "button" => {
-                if let Some(action) = renderer::resolve_button_action(&layout, hit) {
-                    let url = action.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let method = action.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
-                    let body = action.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                    if !url.is_empty() {
-                        let client = state.safe_http.clone();
-                        let url_s = url.to_string();
-                        let method_s = method.to_string();
-                        let body_s = body.to_string();
-                        tokio::spawn(async move {
-                            let _ = client.fetch_bytes_with_method(&url_s, MAX_EXTERNAL_BYTES, &method_s, Some(&body_s)).await;
-                        });
-                    }
-                }
+        if let Some(target) = fire_element_action(state, &layout, hit).await {
+            let mut devices = state.devices.write().await;
+            if let Some(session) = devices.get_mut(device_id) {
+                session.active_design_id = target;
             }
-            "design-link" => {
-                let target = props.get("targetDesignId").and_then(|v| v.as_str()).unwrap_or(DEFAULT_DESIGN_ID);
-                let mut devices = state.devices.write().await;
-                if let Some(session) = devices.get_mut(device_id) {
-                    session.active_design_id = target.to_string();
-                }
-            }
-            "ha-toggle" => {
-                let entity_id = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
-                if !entity_id.is_empty() {
-                    let client = state.ha_client.read().await.clone();
-                    let eid = entity_id.to_string();
-                    let st = state.clone();
-                    tokio::spawn(async move {
-                        if client.toggle(&eid).await.is_ok() {
-                            if let Ok(new_state) = client.get_state(&eid).await {
-                                st.ha_values.write().await.insert(eid, new_state);
-                            }
-                        }
-                    });
-                }
-            }
-            _ => {}
         }
     }
 
@@ -1114,16 +1152,85 @@ pub async fn handle_http_request(
                 Err(_) => json_response(StatusCode::BAD_REQUEST, &json!({"error": "invalid JSON"})),
             }
         }
+        (Method::POST, "/api/live-touch") => {
+            // Studio Live mode: a click on the interactive preview. Mirrors
+            // the device touch path — dot + pressed flash land in the
+            // design's live preview state (rendered by /api/preview?live=1),
+            // button/HA side effects fire, and a design-link hit reports
+            // `navigateTo` so the Studio can follow it.
+            let design_id = query_param(&req, "design").unwrap_or_else(|| DEFAULT_DESIGN_ID.to_string());
+            let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
+            match serde_json::from_slice::<Value>(&body_bytes) {
+                Ok(raw) => {
+                    let x = raw.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let y = raw.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    match raw.get("layout").cloned().map(validate_layout) {
+                        Some(Ok(layout)) => {
+                            let hit = renderer::hit_test_buttons(&layout, x, y);
+                            let hit_id = hit
+                                .and_then(|h| h.get("id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            {
+                                let mut live_states = state.live_states.write().await;
+                                let ls = live_states.entry(design_id.clone()).or_default();
+                                let now = Instant::now();
+                                ls.dots.retain(|(_, _, exp)| *exp > now);
+                                ls.dots.push((x, y, now + Duration::from_secs_f64(DOT_LIFETIME_S)));
+                                if let Some(ref id) = hit_id {
+                                    ls.pressed.insert(id.clone());
+                                }
+                            }
+                            if let Some(ref id) = hit_id {
+                                let st = state.clone();
+                                let d_id = design_id.clone();
+                                let el_id = id.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs_f64(BUTTON_FLASH_S)).await;
+                                    let mut live_states = st.live_states.write().await;
+                                    if let Some(ls) = live_states.get_mut(&d_id) {
+                                        ls.pressed.remove(&el_id);
+                                    }
+                                });
+                            }
+                            let navigate = match hit {
+                                Some(hit) => fire_element_action(&state, &layout, hit).await,
+                                None => None,
+                            };
+                            match navigate {
+                                Some(target) => json_response(StatusCode::OK, &json!({"status": "ok", "navigateTo": target})),
+                                None => json_response(StatusCode::OK, &json!({"status": "ok"})),
+                            }
+                        }
+                        Some(Err(e)) => json_response(StatusCode::UNPROCESSABLE_ENTITY, &json!({"error": "invalid layout", "details": e.errors})),
+                        None => json_response(StatusCode::BAD_REQUEST, &json!({"error": "layout required"})),
+                    }
+                }
+                Err(_) => json_response(StatusCode::BAD_REQUEST, &json!({"error": "invalid JSON"})),
+            }
+        }
         (Method::POST, "/api/preview") => {
+            let design_id = query_param(&req, "design").unwrap_or_else(|| DEFAULT_DESIGN_ID.to_string());
+            let live = query_param(&req, "live").as_deref() == Some("1");
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
             match serde_json::from_slice::<Value>(&body_bytes) {
                 Ok(raw) => match validate_layout(raw) {
                     Ok(layout) => {
                         let ext_vals = state.external_values.read().await;
                         let ha_vals = state.ha_values.read().await;
-                        let empty_set = HashSet::new();
-                        let empty_dots = Vec::new();
-                        let ctx = build_render_context(&ext_vals, DEFAULT_DESIGN_ID, &ha_vals, &empty_set, &empty_dots);
+                        // In live mode, render the design's live preview
+                        // state (touch dots + pressed flashes) instead of an
+                        // empty interaction context.
+                        let (pressed, dots) = if live {
+                            let live_states = state.live_states.read().await;
+                            match live_states.get(&design_id) {
+                                Some(ls) => (ls.pressed.clone(), ls.dots.clone()),
+                                None => (HashSet::new(), Vec::new()),
+                            }
+                        } else {
+                            (HashSet::new(), Vec::new())
+                        };
+                        let ctx = build_render_context(&ext_vals, &design_id, &ha_vals, &pressed, &dots);
                         let images = state.images.read().await.clone();
                         let img = renderer::render(&layout, &ctx, &images);
                         png_response(&img)
@@ -1213,6 +1320,13 @@ pub async fn handle_http_request(
                 }));
             }
 
+            // HashMap iteration order is random per request; sort so the
+            // Studio lists don't reshuffle on every refresh.
+            designs_arr.sort_by(|a, b| {
+                let key = |v: &Value| (v["name"].as_str().unwrap_or("").to_lowercase(), v["id"].as_str().unwrap_or("").to_string());
+                key(a).cmp(&key(b))
+            });
+
             let mut screens_arr = Vec::new();
             for screen in studio.screens.values() {
                 let session = devices.get(&screen.id);
@@ -1243,6 +1357,11 @@ pub async fn handle_http_request(
                     })),
                 }));
             }
+
+            screens_arr.sort_by(|a, b| {
+                let key = |v: &Value| (v["name"].as_str().unwrap_or("").to_lowercase(), v["id"].as_str().unwrap_or("").to_string());
+                key(a).cmp(&key(b))
+            });
 
             let mut devices_arr = Vec::new();
             for (id, session) in devices.iter() {
@@ -1312,18 +1431,20 @@ pub async fn handle_http_request(
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
             if let Ok(raw) = serde_json::from_slice::<Value>(&body_bytes) {
                 if let Some(screen_ids) = raw.get("screenIds").and_then(|v| v.as_array()) {
+                    let mut assigned = 0usize;
                     let mut studio = state.studio.write().await;
                     for sid in screen_ids {
                         if let Some(s) = sid.as_str() {
                             if let Some(scr) = studio.screens.get_mut(s) {
                                 scr.design_id = design_id.to_string();
+                                assigned += 1;
                             }
                         }
                     }
                     drop(studio);
                     state.save_studio_file().await;
                     push_design(&state, design_id, false).await;
-                    json_response(StatusCode::OK, &json!({"status": "ok"}))
+                    json_response(StatusCode::OK, &json!({"status": "ok", "assigned": assigned}))
                 } else {
                     json_response(StatusCode::BAD_REQUEST, &json!({"error": "screenIds array required"}))
                 }
@@ -1466,10 +1587,19 @@ fn png_response(img: &RgbImage) -> Response<Body> {
 }
 
 async fn serve_static_file(path: &Path, content_type: &str) -> Response<Body> {
+    // /static/* assets (app.js, styles.css) get a short cache lifetime so
+    // repeat Studio loads skip the disk read + transfer; the HTML shell
+    // itself is never cached, so a deploy is picked up immediately.
+    let cache_control = if path.file_name().and_then(|n| n.to_str()) == Some("index.html") {
+        "no-cache"
+    } else {
+        "public, max-age=3600"
+    };
     match tokio::fs::read(path).await {
         Ok(data) => Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", content_type)
+            .header("Cache-Control", cache_control)
             .body(Body::from(data))
             .unwrap(),
         Err(_) => Response::builder()
