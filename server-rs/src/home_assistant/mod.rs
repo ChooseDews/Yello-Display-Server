@@ -48,6 +48,39 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Token-endpoint client: Home Assistant answers /auth/token directly, so
+/// redirects are never followed. A redirect there means a proxy login page
+/// (e.g. Authelia) is intercepting the address, and following it lands on an
+/// HTML page that then fails JSON parsing with a cryptic message.
+fn auth_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+}
+
+/// Shown when the configured address answers with a web page instead of
+/// Home Assistant's API (the classic public-hostname-behind-Authelia setup).
+const PROXY_PAGE_MESSAGE: &str = "that address answered with a web page instead of Home Assistant's API \u{2014} it is probably behind a proxy login (such as Authelia). Use Home Assistant's direct address instead, e.g. http://192.168.1.247:8123";
+
+/// Parses a Home Assistant JSON response, turning the "proxy login page
+/// instead of JSON" failure into an explanation instead of serde's
+/// "expected value at line 1".
+async fn json_body(resp: reqwest::Response, what: &str) -> Result<Value, HaError> {
+    let is_html = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/html"))
+        .unwrap_or(false);
+    let bytes = resp.bytes().await.map_err(|e| HaError::Error(e.to_string()))?;
+    if is_html || bytes.first() == Some(&b'<') {
+        return Err(HaError::Error(format!("Could not {what}: {PROXY_PAGE_MESSAGE}")));
+    }
+    serde_json::from_slice(&bytes).map_err(|e| HaError::Error(format!("Could not {what}: {e}")))
+}
+
 impl HaClient {
     pub fn new(url: &str, token: &str) -> Self {
         Self {
@@ -111,7 +144,7 @@ impl HaClient {
         client_id: &str,
     ) -> Result<(String, String, u64), HaError> {
         let base = url.trim_end_matches('/');
-        let resp = http_client()
+        let resp = auth_client()
             .post(format!("{base}/auth/token"))
             .form(&[
                 ("grant_type", "authorization_code"),
@@ -122,13 +155,17 @@ impl HaClient {
             .await
             .map_err(|e| HaError::Error(e.to_string()))?;
         if !resp.status().is_success() {
+            if resp.status().is_redirection() {
+                return Err(HaError::Error(format!(
+                    "Could not complete the sign-in: {PROXY_PAGE_MESSAGE}"
+                )));
+            }
             return Err(HaError::Error(format!(
                 "Home Assistant rejected the sign-in code (HTTP {})",
                 resp.status()
             )));
         }
-        let bytes = resp.bytes().await.map_err(|e| HaError::Error(e.to_string()))?;
-        let val: Value = serde_json::from_slice(&bytes).map_err(|e| HaError::Error(e.to_string()))?;
+        let val: Value = json_body(resp, "complete the sign-in").await?;
         let refresh = val
             .get("refresh_token")
             .and_then(|v| v.as_str())
@@ -182,13 +219,17 @@ impl HaClient {
             .await
             .map_err(|e| HaError::Error(e.to_string()))?;
         if !resp.status().is_success() {
+            if resp.status().is_redirection() {
+                return Err(HaError::Error(format!(
+                    "Could not refresh the Home Assistant session: {PROXY_PAGE_MESSAGE}"
+                )));
+            }
             return Err(HaError::Error(format!(
                 "Home Assistant token refresh failed (HTTP {})",
                 resp.status()
             )));
         }
-        let bytes = resp.bytes().await.map_err(|e| HaError::Error(e.to_string()))?;
-        let val: Value = serde_json::from_slice(&bytes).map_err(|e| HaError::Error(e.to_string()))?;
+        let val: Value = json_body(resp, "refresh the Home Assistant session").await?;
         let access = val
             .get("access_token")
             .and_then(|v| v.as_str())
@@ -227,9 +268,7 @@ impl HaClient {
             return Err(HaError::Error(format!("HTTP {}", resp.status())));
         }
 
-        let bytes = resp.bytes().await.map_err(|e| HaError::Error(e.to_string()))?;
-        let val: Value = serde_json::from_slice(&bytes).map_err(|e| HaError::Error(e.to_string()))?;
-        Ok(val)
+        json_body(resp, "read the entity state").await
     }
 
     pub async fn list_states(&self) -> Result<Vec<HaState>, HaError> {
@@ -248,8 +287,8 @@ impl HaClient {
         if !resp.status().is_success() {
             return Err(HaError::Error(format!("HTTP {}", resp.status())));
         }
-        let bytes = resp.bytes().await.map_err(|e| HaError::Error(e.to_string()))?;
-        serde_json::from_slice(&bytes).map_err(|e| HaError::Error(e.to_string()))
+        let val = json_body(resp, "read Home Assistant states").await?;
+        serde_json::from_value(val).map_err(|e| HaError::Error(e.to_string()))
     }
 
     pub async fn toggle(&self, entity_id: &str) -> Result<(), HaError> {

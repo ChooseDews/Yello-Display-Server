@@ -211,6 +211,7 @@
       <form id="ha-settings-form" class="settings-form">
         <label for="ha-url">Home Assistant URL</label>
         <input id="ha-url" type="url" placeholder="http://homeassistant.local:8123" autocomplete="url">
+        <p class="field-hint">Use the direct address of your Home Assistant (for this house: http://192.168.1.247:8123). The Studio server connects to it itself, so a public hostname behind a proxy login page (like Authelia) cannot work here.</p>
         <label for="ha-token">Long-lived access token</label>
         <input id="ha-token" type="password" placeholder="Leave blank to keep the saved token" autocomplete="new-password">
         <p class="form-help">The token is saved only on this server in a private file. It is never returned to the browser after saving.</p>

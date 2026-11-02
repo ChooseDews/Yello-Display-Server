@@ -539,3 +539,4 @@ esp-web-install-button { display: inline-block; }
   .sel-action.danger { color: #ff9a92; }
   .pa-icon { display: inline-flex; }
 }
+.field-hint { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
