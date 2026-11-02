@@ -205,7 +205,7 @@
     <section class="settings-card">
       <div class="settings-card-heading">
         <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-home"></use></svg></div>
-        <div><h2>Home Assistant</h2><p>Read entities and control devices from your designs.</p></div>
+        <div><h2>Home Assistant</h2><p>Entities and devices for your designs.</p></div>
         <span id="ha-settings-state" class="integration-badge">Checking…</span>
       </div>
       <div id="ha-summary" class="ha-summary hidden">
@@ -221,10 +221,9 @@
       <form id="ha-settings-form" class="settings-form">
         <label for="ha-url">Home Assistant URL</label>
         <input id="ha-url" type="url" placeholder="http://homeassistant.local:8123" autocomplete="url">
-        <p class="field-hint">Use the direct address (this house: http://192.168.1.247:8123). Public hostnames behind a proxy login cannot be reached by the server.</p>
+        <p class="field-hint">Direct address only (this house: http://192.168.1.247:8123) — proxy hostnames do not work.</p>
         <label for="ha-token">Long-lived access token</label>
         <input id="ha-token" type="password" placeholder="Leave blank to keep the saved token" autocomplete="new-password">
-        <p class="form-help">Stored only on this server. Never shown again.</p>
         <div class="settings-actions">
           <button id="ha-save" type="submit" class="primary-button">Test &amp; save</button>
           <button id="ha-clear" type="button" class="danger-button">Disconnect</button>
@@ -232,7 +231,7 @@
         </div>
       </form>
       <div class="oauth-block">
-        <p class="form-help"><strong>Or sign in instead</strong> — no token to paste; the server renews access itself. Saving one method replaces the other.</p>
+        <p class="form-help"><strong>Or sign in instead</strong> — no token to paste.</p>
         <div class="settings-actions">
           <button id="ha-oauth" type="button" class="assign-button">Sign in with Home Assistant</button>
         </div>
@@ -242,12 +241,11 @@
     <section class="settings-card">
       <div class="settings-card-heading">
         <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-cpu"></use></svg></div>
-        <div><h2>Agent access (MCP)</h2><p>Let an MCP client list, edit, and preview screen designs directly.</p></div>
+        <div><h2>Agent access (MCP)</h2></div>
         <span class="integration-badge connected">Built in</span>
       </div>
       <div class="mcp-body">
-        <p>Endpoint: <code id="mcp-endpoint">/mcp</code> (POST, JSON-RPC). Eight tools to list, edit, and preview designs. No login — keep it on your LAN or tailnet.</p>
-        <p class="form-help">Client config:</p>
+        <p>POST <code id="mcp-endpoint">/mcp</code> · JSON-RPC · 8 tools. No login — LAN or tailnet only.</p>
         <pre id="mcp-config" class="mcp-config"></pre>
         <pre id="mcp-prompt" class="mcp-config" hidden></pre>
         <div class="settings-actions">
@@ -260,7 +258,7 @@
     <section class="settings-card">
       <div class="settings-card-heading">
         <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-logo"></use></svg></div>
-        <div><h2>About Yello Studio</h2><p>Version info, project links, and the firmware flasher.</p></div>
+        <div><h2>About Yello Studio</h2></div>
       </div>
       <div class="settings-actions">
         <a class="assign-button" href="/about" data-route="about">Open the About page</a>
@@ -270,14 +268,13 @@
 
   <main id="about-page" class="management-page hidden">
     <div class="page-heading">
-      <div><span class="eyebrow">Yello Studio</span><h1>About</h1><p>Design software for the Yello ESP32 displays, and the firmware that runs on them.</p></div>
+      <div><span class="eyebrow">Yello Studio</span><h1>About</h1><p>Designer and firmware for Yello ESP32 displays.</p></div>
     </div>
     <section class="settings-card">
       <div class="settings-card-heading">
         <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-logo"></use></svg></div>
-        <div><h2>Yello Studio</h2><p id="about-status">A visual designer, live preview, and agent (MCP) access for 240 × 320 ESP32 touch displays.</p></div>
+        <div><h2>Yello Studio</h2><p id="about-status">Visual designer + MCP access for 240 × 320 ESP32 touch displays.</p></div>
       </div>
-      <p class="form-help">Open source — server, firmware, and design format in one repository.</p>
       <div class="settings-actions about-links">
         <a class="primary-button" href="https://github.com/ChooseDews/Yello-Display-Server" target="_blank" rel="noopener"><svg class="ic" aria-hidden="true"><use href="#i-github"></use></svg> GitHub repository</a>
         <a class="assign-button" href="https://github.com/ChooseDews/Yello-Display-Server/releases" target="_blank" rel="noopener">Releases</a>
@@ -287,25 +284,23 @@
     <section class="settings-card">
       <div class="settings-card-heading">
         <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-bolt"></use></svg></div>
-        <div><h2>Flash the Yello firmware</h2><p>Write the latest firmware build to an ESP32 over USB, straight from this page.</p></div>
+        <div><h2>Flash the Yello firmware</h2><p>Flash an ESP32 over USB.</p></div>
         <span id="flash-state" class="integration-badge">Checking…</span>
       </div>
       <div id="flash-region">
         <p class="form-help">Checking whether this server has a firmware build bundled…</p>
       </div>
       <ul class="flash-notes">
-        <li>Use <strong>Chrome or Edge on a computer</strong> — browser flashing needs Web Serial, which Safari and iOS do not support.</li>
-        <li>Plug the display in with a USB data cable, click Connect, and pick the serial port (usually a CH340 or CP210x device).</li>
-        <li>If the flash does not start, hold the display's <strong>BOOT</strong> button while it begins.</li>
-        <li>Installing asks before erasing; a full erase also clears the Wi-Fi settings the device saved for itself.</li>
-        <li>Prefer the command line? The same binaries are on the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a> for esptool.</li>
+        <li><strong>Chrome or Edge on a computer</strong> — no Web Serial in Safari/iOS.</li>
+        <li>USB data cable, then pick the serial port (CH340/CP210x). If it won't start, hold <strong>BOOT</strong>.</li>
+        <li>A full erase also clears the device's saved Wi-Fi. Same binaries for esptool: the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a>.</li>
       </ul>
     </section>
     <section class="settings-card">
       <div class="settings-card-heading">
-        <div><h2>Under the hood</h2><p>A single Rust server renders designs to RGB565 and streams them to the ESP32, which stays a dumb terminal: it draws what it is sent and reports touches back.</p></div>
+        <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-gear"></use></svg></div>
+        <div><h2>Under the hood</h2><p>One Rust server renders designs; the ESP32 stays a dumb terminal.</p></div>
       </div>
-      <p class="form-help">Studio and MCP server in Rust · ESP32 firmware in C on ESP-IDF · browser flashing by ESP Web Tools. Built by John Dews-Flick.</p>
     </section>
   </main>
 

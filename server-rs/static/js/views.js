@@ -46,7 +46,7 @@ export async function renderAboutPage() {
   try {
     const status = await (await fetch("/api/status")).json();
     $("about-status").textContent =
-      `A visual designer, live preview, and agent (MCP) access for 240 × 320 ESP32 touch displays. ` +
+      `Visual designer + MCP access for 240 × 320 ESP32 touch displays. ` +
       `This server holds ${status.designsCount} design(s), knows ${status.knownScreens} screen(s), and has ${status.connectedScreens} connected right now.`;
   } catch { /* the static blurb stays */ }
   if (aboutProbed) return;

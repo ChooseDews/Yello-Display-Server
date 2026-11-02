@@ -50,7 +50,10 @@ button { color: inherit; }
 .deployment-controls label { display: grid; gap: 2px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
 .deployment-controls select { width: 138px; min-height: 28px; padding: 3px 7px; font-size: 11px; text-transform: none; letter-spacing: normal; }
 .deployment-controls .icon-button { width: 28px; height: 28px; }
-.assign-button { height: 28px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); cursor: pointer; font-size: 11px; }
+.assign-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 28px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); cursor: pointer; font-size: 11px; color: inherit; }
+a.primary-button, a.secondary-button, a.danger-button, a.assign-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; text-decoration: none; color: inherit; box-sizing: border-box; }
+a.secondary-button { height: 34px; padding: 0 15px; font-size: 13px; }
+a.assign-button:hover, a.secondary-button:hover { border-color: #596275; background: #242a36; }
 .device-pill {
   display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 11px;
   border: 1px solid var(--line); background: var(--panel); border-radius: 8px; color: #bcc3d0; font-size: 12px;
@@ -326,7 +329,8 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 .settings-actions .subtle { margin-left: 5px; }
 .script-editor { min-height: 190px !important; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.45; tab-size: 4; }
 
-.about-links a { text-decoration: none; }
+.about-links { flex-wrap: wrap; }
+.about-links .assign-button { height: 34px; padding: 0 15px; font-size: 13px; }
 .oauth-block { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 4px; }
 .flash-notes { margin: 14px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .flash-notes strong { color: var(--text); }
