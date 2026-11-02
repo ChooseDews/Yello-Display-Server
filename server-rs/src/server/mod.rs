@@ -2022,14 +2022,13 @@ fn png_response(img: &RgbImage) -> Response<Body> {
 }
 
 async fn serve_static_file(path: &Path, content_type: &str) -> Response<Body> {
-    // /static/* assets (js modules, styles.css) get a short cache lifetime so
-    // repeat Studio loads skip the disk read + transfer; the HTML shell
-    // itself is never cached, so a deploy is picked up immediately.
-    let cache_control = if path.file_name().and_then(|n| n.to_str()) == Some("index.html") {
-        "no-cache"
-    } else {
-        "public, max-age=3600"
-    };
+    // Everything is served no-cache: the Studio is LAN-served and its files
+    // are small, and a cached JS module or stylesheet from before a deploy
+    // otherwise mixes with the fresh HTML shell and breaks the page (the
+    // modules reference DOM ids that may have changed). No validators are
+    // sent, so browsers simply refetch on every load and a deploy always
+    // lands atomically.
+    let cache_control = "no-cache";
     match tokio::fs::read(path).await {
         Ok(data) => Response::builder()
             .status(StatusCode::OK)

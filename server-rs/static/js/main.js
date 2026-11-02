@@ -16,7 +16,7 @@ import { setShowConnections, drawFlowArrows } from "./flow.js";
 import {
   pageFromPath, showPage, renderStudioControls, renderHomeAssistantOptions, renderDesignPage,
   selectScreen, loadDesign, assignDesign, createDesign, saveLayout, saveHomeAssistantSettings, updateStatus,
-} from "./views.js";
+} from "./views.js?v=3";
 
 function handleKeyboard(event) {
   if (isModalOpen()) {
