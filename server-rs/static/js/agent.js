@@ -242,7 +242,8 @@ HA elements and ha() read live entity states from the user's connected Home Assi
 - To change the design, call write_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
 - For a change to ONE existing element, prefer write_element_json: pass the element id and the complete updated element as a JSON object (get_element_json fetches the current one). Reserve write_design_json for structural changes (adding or removing elements or pages).
 - For a change confined to ONE page (renaming it, reworking several of its elements at once), prefer write_page_json: pass the page id and the complete updated page as a JSON object (get_page_json fetches the current one; omit pageId there for the page open in the editor). It replaces just that page; the rest of the design is untouched.
-- For READING the design, use jq_read, and for mechanical bulk edits use jq_write: both take a jq program as one plain string (Rust jaq, run on the server) — no wrapping or escaping, exactly as you would type it at a jq prompt. jq_read returns just the matching slices ('.pages[] | {id, name}', '[.. | objects | select(.type == "text")]'); jq_write replaces the design with the program's single output — ideal for renames, prop sweeps, deletes and reorders without re-emitting the document ('.pages[0].elements |= map(if .type == "text" then .style.fontSize = 20 else . end)').
+- For ordinary targeted edits — renaming a page, changing an element's text or color, deleting or adding one element — use patch_design: a batch of set/remove ops addressed by ID paths ('pages.main.elements.title.props.text'). It is the simplest, least error-prone edit tool, and the batch applies only if every op and the resulting design validate.
+- For READING the design, use jq_read, and reserve jq_write for mechanical bulk sweeps across many elements at once: both take a jq program as one plain string (Rust jaq, run on the server) — no wrapping or escaping, exactly as you would type it at a jq prompt. jq_read returns just the matching slices ('.pages[] | {id, name}', '[.. | objects | select(.type == "text")]'); jq_write replaces the design with the program's single output — ideal for renames, prop sweeps, deletes and reorders without re-emitting the document ('.pages[0].elements |= map(if .type == "text" then .style.fontSize = 20 else . end)').
 - To write or change a script element's code, use write_script_code with the code as one plain string. Never embed script code inside write_design_json or write_element_json payloads — nested inside that JSON, the script's quotes and newlines need double escaping and usually arrive broken.
 - Then call view_screen and actually look at the render before saving: fix overlaps, clipped or unreadable text, and elements running off the page. view_screen renders the open design including your unsaved changes, with live values, and returns an image; pass pageId to inspect a different page, or designId + pageId for another design.
 - After a successful edit (write_design_json, write_page_json, write_element_json, or write_script_code), call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
@@ -324,6 +325,34 @@ const TOOLS = [
           page: { type: "object", description: "The complete replacement page object (same shape as in the Design JSON; its id is forced to pageId)." },
         },
         required: ["pageId", "page"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "patch_design",
+      description: "Apply a batch of small targeted edits to the open design — the simplest, least error-prone way to change a design. Each op is {op: 'set'|'remove', path, value?} where path is a dot path that addresses pages and elements BY ID (never by position): 'pages.main.name', 'pages.main.elements.title.props.text', 'pages.main.elements.title.style.color', 'background'. 'set' creates or replaces the value at the path — setting 'pages.<pageId>.elements.<newElementId>' to a complete element object ADDS that element; 'remove' deletes the page, element or property at the path. The batch is all-or-nothing: every op is checked, then the whole design is validated; if anything fails, nothing is applied and the result lists each failing op. Use this for renames, text/prop changes, deletes and single adds; use jq_write for sweeps across many elements at once.",
+      parameters: {
+        type: "object",
+        properties: {
+          ops: {
+            type: "array",
+            description: "The edits to apply, in order (max 100).",
+            items: {
+              type: "object",
+              properties: {
+                op: { type: "string", enum: ["set", "remove"], description: "'set' writes a value at the path; 'remove' deletes whatever the path addresses." },
+                path: { type: "string", description: "Dot path addressing pages/elements by id, e.g. 'pages.main.elements.clock1.props.format'." },
+                value: { description: "The JSON value to write (required for 'set'; any JSON type)." },
+              },
+              required: ["op", "path"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["ops"],
         additionalProperties: false,
       },
     },
@@ -600,6 +629,111 @@ async function toolSetPageJson(args) {
   };
 }
 
+const PATCH_FORBIDDEN_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** Descend one path segment: arrays of id-bearing objects resolve by id,
+ *  plain arrays by numeric index, objects by key. Throws on a miss. */
+function patchDescend(node, segment) {
+  if (Array.isArray(node)) {
+    const byId = node.find((item) => item && typeof item === "object" && item.id === segment);
+    if (byId !== undefined) return byId;
+    if (/^\d+$/.test(segment)) {
+      const index = Number(segment);
+      if (index < node.length) return node[index];
+      throw new Error(`array index ${index} is out of range (length ${node.length})`);
+    }
+    throw new Error(`no entry with id '${segment}' in this array`);
+  }
+  if (node && typeof node === "object") {
+    if (Object.prototype.hasOwnProperty.call(node, segment)) return node[segment];
+    throw new Error(`no key '${segment}' here`);
+  }
+  throw new Error(`cannot descend into a ${node === null ? "null" : typeof node} at '${segment}'`);
+}
+
+/** Apply one set/remove op to a parent container at its final segment. */
+function patchApplyLeaf(parent, segment, op) {
+  if (Array.isArray(parent)) {
+    const index = parent.findIndex((item) => item && typeof item === "object" && item.id === segment);
+    if (op.op === "set") {
+      const value = structuredClone(op.value);
+      if (index >= 0) {
+        if (value && typeof value === "object" && !Array.isArray(value)) value.id = segment;
+        parent[index] = value;
+      } else if (/^\d+$/.test(segment)) {
+        const at = Number(segment);
+        if (at > parent.length) throw new Error(`array index ${at} is out of range (length ${parent.length})`);
+        parent[at] = value;
+      } else {
+        if (value && typeof value === "object" && !Array.isArray(value)) value.id = segment;
+        parent.push(value);
+      }
+      return;
+    }
+    if (index >= 0) {
+      parent.splice(index, 1);
+    } else if (/^\d+$/.test(segment) && Number(segment) < parent.length) {
+      parent.splice(Number(segment), 1);
+    } else {
+      throw new Error(`nothing with id '${segment}' to remove`);
+    }
+    return;
+  }
+  if (parent && typeof parent === "object") {
+    if (op.op === "set") {
+      parent[segment] = structuredClone(op.value);
+    } else {
+      if (!Object.prototype.hasOwnProperty.call(parent, segment)) {
+        throw new Error(`no key '${segment}' to remove`);
+      }
+      delete parent[segment];
+    }
+    return;
+  }
+  throw new Error(`path ends inside a ${parent === null ? "null" : typeof parent}, not an object or array`);
+}
+
+/**
+ * patch_design: a batch of set/remove ops addressed by dot paths that
+ * resolve pages and elements by id ('pages.main.elements.title.props.text').
+ * All-or-nothing: ops apply to a clone, the result is schema-validated via
+ * applyDesignDoc, and any failure leaves the editor untouched.
+ */
+async function toolPatchDesign(args) {
+  if (!S.layout) throw new Error("No design is open in the editor yet.");
+  const ops = Array.isArray(args.ops) ? args.ops : [];
+  if (!ops.length) return { applied: false, error: "Pass at least one op in 'ops'." };
+  if (ops.length > 100) return { applied: false, error: `Too many ops (${ops.length}); the limit is 100 per call.` };
+  const doc = structuredClone(S.layout);
+  const errors = [];
+  ops.forEach((op, index) => {
+    const label = `op ${index + 1}${op && op.path ? ` (${op.path})` : ""}`;
+    try {
+      if (!op || (op.op !== "set" && op.op !== "remove")) throw new Error("each op needs op: 'set' or 'remove'");
+      if (typeof op.path !== "string" || !op.path.trim()) throw new Error("each op needs a dot 'path'");
+      const segments = op.path.split(".").map((s) => s.trim()).filter(Boolean);
+      if (!segments.length || segments.length > 12) throw new Error("path must have 1-12 segments");
+      const bad = segments.find((s) => PATCH_FORBIDDEN_SEGMENTS.has(s));
+      if (bad) throw new Error(`path segment '${bad}' is not allowed`);
+      if (op.op === "set" && !("value" in op)) throw new Error("'set' ops need a 'value'");
+      let parent = doc;
+      for (let i = 0; i < segments.length - 1; i++) parent = patchDescend(parent, segments[i]);
+      patchApplyLeaf(parent, segments[segments.length - 1], op);
+    } catch (error) {
+      errors.push({ index, path: op && op.path, error: `${label}: ${error.message}` });
+    }
+  });
+  if (errors.length) return { applied: false, errors };
+  const applied = await applyDesignDoc(doc);
+  if (!applied.applied) return applied;
+  return {
+    applied: true,
+    opsApplied: ops.length,
+    summary: designSummary(S.layout),
+    note: "Patch applied to the editor (not saved yet — call save_design to persist).",
+  };
+}
+
 /** Run a jq program (a plain string, taken directly) over the open design. */
 async function runJqOverDesign(args) {
   if (!S.layout) throw new Error("No design is open in the editor yet.");
@@ -818,6 +952,7 @@ const TOOL_IMPL = {
   write_element_json: toolSetElementJson,
   get_page_json: toolGetPageJson,
   write_page_json: toolSetPageJson,
+  patch_design: toolPatchDesign,
   jq_read: toolJqRead,
   jq_write: toolJqWrite,
   write_script_code: toolSetScriptCode,
