@@ -595,14 +595,14 @@ esp-web-install-button { display: inline-block; }
 .agent-send-button:not(:disabled):hover { background: #ffdb68; }
 .agent-send-button:disabled { opacity: .45; cursor: default; }
 /* Status bar under the composer: model picker bottom-left, usage right. */
-.agent-statusbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; min-height: 28px; }
+.agent-statusbar { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; min-height: 28px; }
 .agent-usage { font-size: 11px; color: var(--muted); text-align: right; white-space: nowrap; }
-.agent-model-picker { position: relative; min-width: 0; }
+.agent-model-picker { min-width: 0; }
 .agent-model-button { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; border: 0; background: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 5px 8px; border-radius: 8px; }
 .agent-model-button:hover { color: var(--text); background: #1d222c; }
 .agent-model-button .ic { width: 13px; height: 13px; flex: none; }
 .agent-model-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
-.agent-model-dropdown { position: absolute; left: 0; bottom: calc(100% + 6px); width: min(400px, calc(100vw - 40px)); max-width: 86vw; border: 1px solid var(--line-strong); border-radius: 12px; background: #14171f; box-shadow: 0 18px 50px rgba(0, 0, 0, .55); z-index: 40; display: flex; flex-direction: column; overflow: hidden; }
+.agent-model-dropdown { position: absolute; left: 0; bottom: calc(100% + 6px); width: min(400px, 100%); border: 1px solid var(--line-strong); border-radius: 12px; background: #14171f; box-shadow: 0 18px 50px rgba(0, 0, 0, .55); z-index: 40; display: flex; flex-direction: column; overflow: hidden; }
 .agent-model-search { display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-bottom: 1px solid var(--line); color: var(--muted); }
 .agent-model-search .ic { width: 15px; height: 15px; flex: none; }
 .agent-model-search input { border: 0; background: transparent; min-height: 0; padding: 0; outline: none; font-size: 13px; }

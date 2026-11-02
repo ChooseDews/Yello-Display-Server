@@ -109,7 +109,7 @@ And: text(f"Office {ha('sensor.office_temperature')}°C") — note: use double q
 HA elements and ha() read live entity states from the user's connected Home Assistant; the current entity list (id = state) is included in the context message when HA is connected. Only use entity ids from that list or already present in the design; never invent entity ids. ha-toggle works for entities in domains like light, switch, fan, cover, climate (anything with on/off).
 
 ## How to work
-- Always call get_current_design first and edit the JSON it returns — it is the ground truth for this design's shapes and conventions.
+- This conversation starts with a copy of the open design's full Design JSON and a render of its active page. Work from that copy; call get_current_design to refresh it whenever the design may have changed since (after the user edits in the Studio, or when you need the ground truth again).
 - To change the design, call set_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
 - Then call view_screen and actually look at the render before saving: fix overlaps, clipped or unreadable text, and elements running off the page. view_screen renders the open design including your unsaved changes, with live values, and returns an image; pass pageId to inspect a different page, or designId + pageId for another design.
 - After a successful set_design_json, call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
@@ -824,7 +824,7 @@ let currentChatId = null;
 let currentChatCreatedAt = 0;
 
 function chatTitle() {
-  const first = conversation.find((m) => m.role === "user" && typeof m.content === "string");
+  const first = conversation.find((m) => m.role === "user" && typeof m.content === "string" && !m._context);
   const text = first?.content.trim().replace(/\s+/g, " ") || "";
   return text ? text.slice(0, 70) : "Chat";
 }
@@ -869,6 +869,7 @@ function renderConversationDom() {
   box.replaceChildren();
   for (let i = 0; i < conversation.length; i += 1) {
     const message = conversation[i];
+    if (message._context) continue;
     if (message.role === "user" && typeof message.content === "string") {
       addMessage("user", message.content);
     } else if (message.role === "user" && Array.isArray(message.content)) {
@@ -946,6 +947,7 @@ async function restoreLastChat() {
 function setHistoryOpen(open) {
   $("agent-history-view").classList.toggle("hidden", !open);
   $("agent-system-prompt")?.classList.toggle("hidden", open);
+  $("agent-tools-prompt")?.classList.toggle("hidden", open);
   $("agent-messages").classList.toggle("hidden", open);
   document.querySelector("#agent-chat-card .agent-composer")?.classList.toggle("hidden", open);
   document.querySelector("#agent-chat-card .agent-statusbar")?.classList.toggle("hidden", open);
@@ -1012,6 +1014,36 @@ function fmtTokens(n) {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0);
 }
 
+/** Seed a fresh conversation with the current design: its full Design JSON
+ *  plus a render of the active page (a 320x240 screenshot costs roughly
+ *  100-260 vision tokens depending on the provider — cheap next to the
+ *  fixed prompt overhead). Both are marked _context so the transcript never
+ *  renders them as user bubbles; sanitizeMessage strips the flag before
+ *  anything goes to the API, and the usual image collapsing applies. */
+async function seedStartContext() {
+  if (!S.layout) return;
+  conversation.push({
+    role: "user",
+    _context: true,
+    content: `Starting context: my design "${S.layout.name || S.currentDesignId}" (id ${S.currentDesignId}) is open in the editor${S.dirty ? " with unsaved changes" : ""}. Here is its full Design JSON right now — work from this copy instead of calling get_current_design first:\n\n${JSON.stringify(S.layout)}`,
+  });
+  try {
+    const view = await toolViewScreen({});
+    if (view?.image) {
+      conversation.push({
+        role: "user",
+        _context: true,
+        content: [
+          { type: "text", text: `Starting context: ${view.imageCaption || "a render of the design's active page, rendered just now:"}` },
+          { type: "image_url", image_url: { url: view.image } },
+        ],
+      });
+    }
+  } catch {
+    // The render is a bonus; the JSON seed still stands.
+  }
+}
+
 async function sendAgentMessage() {
   const input = $("agent-input");
   const text = input.value.trim();
@@ -1031,6 +1063,7 @@ async function sendAgentMessage() {
   $("agent-send").disabled = true;
   $("agent-stop").classList.remove("hidden");
   aborter = new AbortController();
+  if (conversation.length === 0) await seedStartContext();
   addMessage("user", text);
   conversation.push({ role: "user", content: text });
   try {
@@ -1147,6 +1180,16 @@ export function initAgentPage() {
   $("agent-history").onclick = () => setHistoryOpen(true);
   $("agent-history-close").onclick = () => setHistoryOpen(false);
   $("agent-system-prompt-body").textContent = SYSTEM_PROMPT;
+  $("agent-tools-summary").textContent = `Tools (${TOOLS.length})`;
+  $("agent-tools-body").textContent = TOOLS.map((tool) => {
+    const fn = tool.function;
+    const props = fn.parameters?.properties || {};
+    const required = new Set(fn.parameters?.required || []);
+    const params = Object.entries(props)
+      .map(([name, spec]) => `${name} (${spec.type || "value"}${required.has(name) ? ", required" : ""})`)
+      .join(", ");
+    return `${fn.name} — ${fn.description}${params ? `\n  params: ${params}` : ""}`;
+  }).join("\n\n");
   const devButton = $("agent-dev");
   const applyDev = () => {
     const on = localStorage.getItem("yello-agent-dev") === "1";
