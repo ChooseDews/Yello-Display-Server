@@ -2,7 +2,7 @@
 // the browser (the user's key never touches this server — it lives in
 // localStorage and is sent only to openrouter.ai). The model drives the
 // Studio through client-side tools that reuse the editor's own validated
-// paths: set_design_json goes through the same /api/layout/validate the
+// paths: write_design_json goes through the same /api/layout/validate the
 // JSON editor uses, save_design is the Studio's own saveLayout().
 
 import { $ } from "./util.js";
@@ -219,14 +219,15 @@ Sparkline (loop + line + a small label; size 11 = 8px glyphs, so the 5-char cloc
   label(5, 5, now("%H:%M"), "#f2c94c", 11, "la")
 
 ## Home Assistant
-HA elements and ha() read live entity states from the user's connected Home Assistant; the current entity list (id = state) is included in the context message when HA is connected. Only use entity ids from that list or already present in the design; never invent entity ids. ha-toggle works for entities in domains like light, switch, fan, cover, climate (anything with on/off).
+HA elements and ha() read live entity states from the user's connected Home Assistant; the current entity list (id = state) is included in the context message when HA is connected. Only use entity ids from that list or already present in the design; never invent entity ids. ha-toggle works for entities in domains like light, switch, fan, cover, climate (anything with on/off). When Home Assistant is connected you also have list_home_assistant_sensors — call it when you need the full live entity list with names, states and units (the context message only carries a truncated summary).
 
 ## How to work
 - This conversation starts with a copy of the open design's full Design JSON and a render of its active page. Work from that copy; call get_current_design to refresh it whenever the design may have changed since (after the user edits in the Studio, or when you need the ground truth again).
-- To change the design, call set_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
+- To change the design, call write_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
+- For a change to ONE existing element, prefer write_element_json: pass the element id and the complete updated element as a JSON object (get_element_json fetches the current one). Reserve write_design_json for structural changes (adding or removing elements or pages).
+- To write or change a script element's code, use write_script_code with the code as one plain string. Never embed script code inside write_design_json or write_element_json payloads — nested inside that JSON, the script's quotes and newlines need double escaping and usually arrive broken.
 - Then call view_screen and actually look at the render before saving: fix overlaps, clipped or unreadable text, and elements running off the page. view_screen renders the open design including your unsaved changes, with live values, and returns an image; pass pageId to inspect a different page, or designId + pageId for another design.
-- After a successful set_design_json, call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
-- Use validate_design to check a document without applying it.
+- After a successful edit (write_design_json, write_element_json, or write_script_code), call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
 - Keep frames inside the page, avoid overlaps unless asked, give new elements unique ids, and prefer fontSize >= 12 for readable text on the small display.
 - Be concise in chat. Summarize what you changed in one or two sentences; do not paste the whole JSON back.`;
 
@@ -242,7 +243,7 @@ const TOOLS = [
   {
     type: "function",
     function: {
-      name: "set_design_json",
+      name: "write_design_json",
       description: "Replace the current design with a complete schema-v2 document (JSON string). Validated against the device schema and applied to the editor; returns a summary or the validation errors.",
       parameters: {
         type: "object",
@@ -255,12 +256,44 @@ const TOOLS = [
   {
     type: "function",
     function: {
-      name: "validate_design",
-      description: "Validate a complete design document (JSON string) against the device schema without applying it. Returns the normalized document summary or the validation errors.",
+      name: "get_element_json",
+      description: "Return one element of the design currently open in the editor, by element id (searches every page, then shared elements), as a JSON object — the starting point for editing just that element.",
       parameters: {
         type: "object",
-        properties: { json: { type: "string", description: "The design document as a JSON string." } },
-        required: ["json"],
+        properties: { elementId: { type: "string", description: "The element's id." } },
+        required: ["elementId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_element_json",
+      description: "Replace ONE element of the open design, by id, with the complete updated element passed as a JSON object (not a string). Everything else in the design is untouched. The whole design is re-validated against the device schema and applied to the editor; returns validation errors if any. Use get_element_json first to see the element as it is. For script code, prefer write_script_code.",
+      parameters: {
+        type: "object",
+        properties: {
+          elementId: { type: "string", description: "The id of the element to replace." },
+          element: { type: "object", description: "The complete replacement element object (same shape as in the Design JSON; its id is forced to elementId)." },
+        },
+        required: ["elementId", "element"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_script_code",
+      description: "Set the script code (props.code) of a script element in the open design. Pass the code as ONE plain string, exactly as it should run — newlines, quotes and apostrophes are fine; do not pre-escape anything. This is the only reliable way to write scripts: embedding code inside write_design_json / write_element_json JSON double-escapes it. The design is re-validated and applied to the editor; check the result with view_screen.",
+      parameters: {
+        type: "object",
+        properties: {
+          elementId: { type: "string", description: "The id of the script element." },
+          code: { type: "string", description: "The complete script source, exactly as written." },
+        },
+        required: ["elementId", "code"],
         additionalProperties: false,
       },
     },
@@ -307,8 +340,16 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "list_home_assistant_sensors",
+      description: "List the user's Home Assistant entities (sensors and other devices) with their current live states, names and units. Only available while Home Assistant is connected.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "open_design",
-      description: "Open a different design in the editor by id (switches what get_current_design / set_design_json operate on).",
+      description: "Open a different design in the editor by id (switches what get_current_design / write_design_json operate on).",
       parameters: {
         type: "object",
         properties: { designId: { type: "string" } },
@@ -360,17 +401,10 @@ async function toolGetCurrentDesign() {
   return { designId: S.currentDesignId, json: JSON.stringify(S.layout) };
 }
 
-async function toolValidateDesign(args) {
-  const doc = JSON.parse(args.json);
-  const { response, result } = await validateDoc(doc);
-  if (!response.ok) {
-    return { valid: false, errors: result.details || result.errors || [{ path: "$", message: result.error || "Validation failed" }] };
-  }
-  return { valid: true, summary: designSummary(result.layout) };
-}
-
-async function toolSetDesignJson(args) {
-  const doc = JSON.parse(args.json);
+/** Validate a complete document and, when valid, make it the editor's
+ *  layout (undo history, dirty flag, preview — the write_design_json path).
+ *  Pass { selectId } to set the editor selection before rendering. */
+async function applyDesignDoc(doc, opts = {}) {
   const { response, result } = await validateDoc(doc);
   if (!response.ok) {
     return { applied: false, errors: result.details || result.errors || [{ path: "$", message: result.error || "Validation failed" }] };
@@ -382,12 +416,91 @@ async function toolSetDesignJson(args) {
   if (!pageOf(S.layout, activePageIdFor(designId))) {
     S.activePages.set(designId, homePageIdOf(S.layout));
   }
-  S.selectedId = null;
+  if ("selectId" in opts) S.selectedId = opts.selectId;
   S.dirty = true;
   syncCodeEditor(true);
   renderAll();
   schedulePreview(0);
+  return { applied: true };
+}
+
+async function toolSetDesignJson(args) {
+  const doc = JSON.parse(args.json);
+  const applied = await applyDesignDoc(doc, { selectId: null });
+  if (!applied.applied) return applied;
   return { applied: true, summary: designSummary(S.layout), note: "Applied to the editor (not saved yet — call save_design to persist)." };
+}
+
+/** Find an element by id: every page in order, then shared elements. */
+function findElement(layout, elementId) {
+  for (const page of layout.pages || []) {
+    const list = page.elements || [];
+    const index = list.findIndex((el) => el.id === elementId);
+    if (index >= 0) return { list, index, pageId: page.id, element: list[index] };
+  }
+  const list = layout.sharedElements || [];
+  const index = list.findIndex((el) => el.id === elementId);
+  if (index >= 0) return { list, index, pageId: null, element: list[index] };
+  return null;
+}
+
+function activePageOpts(elementId, pageId) {
+  const designId = S.editingDesignId ?? S.currentDesignId;
+  return pageId && pageId === activePageIdFor(designId) ? { selectId: elementId } : {};
+}
+
+async function toolGetElementJson(args) {
+  if (!S.layout) throw new Error("No design is open in the editor yet.");
+  const found = findElement(S.layout, args.elementId);
+  if (!found) return { error: `No element with id "${args.elementId}" in the open design.` };
+  return { elementId: args.elementId, page: found.pageId || "shared", element: found.element };
+}
+
+async function toolSetElementJson(args) {
+  if (!S.layout) throw new Error("No design is open in the editor yet.");
+  if (!args.element || typeof args.element !== "object" || Array.isArray(args.element)) {
+    return { applied: false, error: "Pass the complete replacement element as a JSON object in 'element'." };
+  }
+  const doc = structuredClone(S.layout);
+  const found = findElement(doc, args.elementId);
+  if (!found) {
+    return { applied: false, error: `No element with id "${args.elementId}" in the open design. Use write_design_json to add new elements.` };
+  }
+  found.list[found.index] = { ...args.element, id: args.elementId };
+  const applied = await applyDesignDoc(doc, activePageOpts(args.elementId, found.pageId));
+  if (!applied.applied) return applied;
+  return {
+    applied: true,
+    elementId: args.elementId,
+    type: args.element.type,
+    page: found.pageId || "shared",
+    note: "Element updated in the editor (not saved yet — call save_design to persist).",
+  };
+}
+
+async function toolSetScriptCode(args) {
+  if (!S.layout) throw new Error("No design is open in the editor yet.");
+  if (typeof args.code !== "string") {
+    return { applied: false, error: "Pass the script as one plain string in 'code'." };
+  }
+  const doc = structuredClone(S.layout);
+  const found = findElement(doc, args.elementId);
+  if (!found) {
+    return { applied: false, error: `No element with id "${args.elementId}" in the open design.` };
+  }
+  if (found.element.type !== "script") {
+    return { applied: false, error: `Element "${args.elementId}" is a ${found.element.type} element, not a script. Use write_element_json for it.` };
+  }
+  found.element.props = { ...(found.element.props || {}), code: args.code };
+  const applied = await applyDesignDoc(doc, activePageOpts(args.elementId, found.pageId));
+  if (!applied.applied) return applied;
+  return {
+    applied: true,
+    elementId: args.elementId,
+    chars: args.code.length,
+    lines: args.code.split("\n").length,
+    note: "Script updated in the editor (not saved yet). Call view_screen to check what it renders, then save_design to persist.",
+  };
 }
 
 async function toolSaveDesign() {
@@ -455,6 +568,30 @@ async function toolListScreens() {
   return S.studio.screens.map((s) => ({ id: s.id, name: s.name, connected: s.connected, designId: s.designId }));
 }
 
+/** Home Assistant counts as enabled only while it is connected here. */
+function haEnabled() {
+  return Boolean(S.homeAssistant?.configured);
+}
+
+/** The tools offered to the model: the HA sensor tool exists only while
+ *  Home Assistant is connected. */
+function availableTools() {
+  return TOOLS.filter((tool) => tool.function.name !== "list_home_assistant_sensors" || haEnabled());
+}
+
+async function toolListHomeAssistantSensors() {
+  if (!haEnabled()) {
+    return { enabled: false, sensors: [], note: "Home Assistant is not connected in this Studio, so no sensors are available." };
+  }
+  const sensors = (S.homeAssistant.entities || []).map((e) => ({
+    entityId: e.entityId,
+    name: e.name,
+    state: e.state,
+    ...(e.unit ? { unit: e.unit } : {}),
+  }));
+  return { enabled: true, count: sensors.length, sensors };
+}
+
 async function toolOpenDesign(args) {
   await loadDesign(args.designId);
   return { opened: args.designId, current: S.currentDesignId };
@@ -473,12 +610,15 @@ async function toolAssignDesign(args) {
 
 const TOOL_IMPL = {
   get_current_design: toolGetCurrentDesign,
-  set_design_json: toolSetDesignJson,
-  validate_design: toolValidateDesign,
+  write_design_json: toolSetDesignJson,
+  get_element_json: toolGetElementJson,
+  write_element_json: toolSetElementJson,
+  write_script_code: toolSetScriptCode,
   save_design: toolSaveDesign,
   view_screen: toolViewScreen,
   list_designs: toolListDesigns,
   list_screens: toolListScreens,
+  list_home_assistant_sensors: toolListHomeAssistantSensors,
   open_design: toolOpenDesign,
   assign_design: toolAssignDesign,
 };
@@ -729,7 +869,7 @@ function renderContextGraph() {
   const est = (chars) => Math.ceil(chars / 4);
   const seg = {
     system: est(SYSTEM_PROMPT.length),
-    tools: est(JSON.stringify(TOOLS).length),
+    tools: est(JSON.stringify(availableTools()).length),
     thinking: 0,
     toolcalls: 0,
     images: 0,
@@ -1010,7 +1150,7 @@ async function streamChat(messages) {
     body: JSON.stringify({
       model: $("agent-model").value,
       messages,
-      tools: TOOLS,
+      tools: availableTools(),
       stream: true,
       usage: { include: true },
     }),
@@ -1362,6 +1502,7 @@ async function sendAgentMessage() {
     return;
   }
   localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
+  renderToolsList();
   input.value = "";
   input.style.height = "auto";
   const epoch = chatEpoch;
@@ -1448,6 +1589,22 @@ async function sendAgentMessage() {
 
 // ---------- page setup ----------
 
+/** Dev-mode tools dropdown: reflects the tools actually offered right now
+ *  (the HA sensor tool appears only while Home Assistant is connected). */
+function renderToolsList() {
+  const tools = availableTools();
+  $("agent-tools-summary").textContent = `Tools (${tools.length})`;
+  $("agent-tools-body").textContent = tools.map((tool) => {
+    const fn = tool.function;
+    const props = fn.parameters?.properties || {};
+    const required = new Set(fn.parameters?.required || []);
+    const params = Object.entries(props)
+      .map(([name, spec]) => `${name} (${spec.type || "value"}${required.has(name) ? ", required" : ""})`)
+      .join(", ");
+    return `${fn.name} — ${fn.description}${params ? `\n  params: ${params}` : ""}`;
+  }).join("\n\n");
+}
+
 export function initAgentPage() {
   if (initialized) return;
   initialized = true;
@@ -1488,16 +1645,7 @@ export function initAgentPage() {
   $("agent-history").onclick = () => setHistoryOpen(true);
   $("agent-history-close").onclick = () => setHistoryOpen(false);
   $("agent-system-prompt-body").textContent = SYSTEM_PROMPT;
-  $("agent-tools-summary").textContent = `Tools (${TOOLS.length})`;
-  $("agent-tools-body").textContent = TOOLS.map((tool) => {
-    const fn = tool.function;
-    const props = fn.parameters?.properties || {};
-    const required = new Set(fn.parameters?.required || []);
-    const params = Object.entries(props)
-      .map(([name, spec]) => `${name} (${spec.type || "value"}${required.has(name) ? ", required" : ""})`)
-      .join(", ");
-    return `${fn.name} — ${fn.description}${params ? `\n  params: ${params}` : ""}`;
-  }).join("\n\n");
+  renderToolsList();
   const devButton = $("agent-dev");
   const applyDev = () => {
     const on = localStorage.getItem("yello-agent-dev") === "1";
