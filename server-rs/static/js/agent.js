@@ -126,7 +126,7 @@ const SYSTEM_PROMPT = `You are the agent built into Yello Studio, a designer for
 ## Design document (schema v2)
 { schemaVersion: 2, name, profile: "ili9341-240x320", orientation: "portrait"|"landscape", background: "#0a0a1e", idleHomeSeconds: 0, homePageId: "<page id>", pages: [...], sharedElements: [...], dataSources: [...], actions: [...] }
 - pages: 1..50 pages, each { id, name, background, elements: [0..100 elements] }. Page ids are unique slugs; homePageId must name one of them. Portrait pages are 240 wide x 320 tall; landscape 320 x 240.
-- Element: { id (unique slug), type, name, frame: {x, y, w, h} in page pixels, style: {...}, props: {...}, visible: true, locked: false }. Elements render in array order (later = on top).
+- Element: { id (unique slug), type, name, frame: {x, y, w, h} in page pixels, style: {...}, props: {...}, visible: true, locked: false }. An element may also carry "group": "<name>" — an editor-only Layers-panel grouping that rendering ignores. Elements render in array order (later = on top).
 - sharedElements: elements with an extra pages: ["pageId", ...] field; a shared element renders ONLY on the pages listed there.
 - Colors are "#rrggbb". Common style keys: color, fontSize (number), align: "left"|"center"|"right", verticalAlign: "top"|"middle"|"bottom", radius (corner radius px).
 - Text renders in Liberation Sans Bold with a monochrome emoji fallback: emoji and symbols like 🔥 ⚠ ✅ 🌡 render in the element's text color at about one character width each, so they can be used in text, clock formats, button labels, and script text() output. (Script label() is different: it uses an 8x8 ASCII bitmap font, so no emoji there — they become "?".)
@@ -179,6 +179,10 @@ Built-in functions:
 - source("weather") -> the current text of an http-text data source by id (the same values external-text elements display); "" when the source is missing or has not fetched yet.
 - jq(json_text, ".current.temp_c") -> runs a jq program over JSON text (same jq syntax as the jq_read / jq_write tools) and returns the result: a single scalar output comes back as a number / string / bool; objects, arrays and multi-output programs come back as JSON text (feed it back into jq() to dig deeper). Unparsable JSON returns None — guard with == None. A malformed jq program is a script error.
 - len(s) -> string length in characters. str(x), int(x) (truncates toward zero), float(x), bool(x) -> conversions.
+- substr(s, start, [length]) -> a character slice of s (start is 0-based, clamped). pad(s, width, [fill = " "]) -> s left-padded to width characters (for right-aligning numbers); rpad(...) pads on the right. replace(s, from, to) -> s with every occurrence of from swapped for to.
+- text_width(s, [size = 16]) -> the pixel width label() would draw s at that size (characters × the glyph cell) — use it to lay out text precisely without guessing.
+- now_part(part) -> a number from the studio clock: "year", "month" (1-12), "day" (1-31), "hour" (0-23), "minute", "second", or "weekday" (Monday = 0 … Sunday = 6). For analog clocks, day-progress rings, weekday highlights.
+- ha_count(domain) -> how many Home Assistant entities exist in a domain ("light", "switch", ...); ha_count(domain, state) counts only entities in that state. Errored entities are not counted. Example: ha_count("light", "on") = lights currently on.
 - clamp(x, lo, hi); min(a, b, ...); max(a, b, ...); abs(x); round(x) or round(x, digits); floor(x); ceil(x); pow(x, y); sqrt(x); sin(x), cos(x), tan(x) (radians).
 - lerp(a, b, t) -> a + (b - a) * t. map_range(x, in_min, in_max, out_min, out_max) -> x linearly rescaled from one range to another (e.g. a sensor range to a bar width).
 - upper(s); lower(s) -> case-folded copies. rgb(r, g, b) -> a "#rrggbb" color from 0-255 channels (clamped), for computed colors.
@@ -186,6 +190,9 @@ Built-in functions:
 - clear("#rrggbb") -> fill the whole frame with a color. Colors are always "#rrggbb" strings.
 - rect(x, y, w, h, color, radius = 0) -> filled rectangle (radius rounds the corners).
 - circle(cx, cy, r, color) -> filled circle.
+- arc(cx, cy, r, from_deg, to_deg, color, width = 3) -> stroked arc. Angles are clock-face degrees: 0 = up (12 o'clock), increasing clockwise, so arc(cx, cy, r, 0, 360, c) is a full ring and arc(cx, cy, r, 0, frac * 360, c) is a progress ring starting at the top.
+- triangle(x1, y1, x2, y2, x3, y3, color) -> filled triangle.
+- vgrad(x, y, w, h, top_color, bottom_color) -> filled rectangle with a vertical gradient from the top color to the bottom color.
 - line(x0, y0, x1, y1, color, width = 1) -> straight line.
 - label(x, y, text, color = "#ffffff", size = 16, anchor = "la") -> draw text on the canvas. label uses a fixed bitmap font: every character cell is a square of G px, where G = 8 * round(size / 8) — sizes 4-11 give G = 8, 12-19 give 16, 20-27 give 24. EVERY character (digits, spaces, symbols) is exactly G px wide, so a string of N characters is N * G px wide — use that to position and center text exactly. anchor is two letters: horizontal l (x is the left edge) / c or m (x is the center) / r (x is the right edge); vertical a (y is the top) / m (y is the middle) / b (y is the bottom edge). Example anchors: "la" top-left, "mm" centered, "rb" bottom-right.
 

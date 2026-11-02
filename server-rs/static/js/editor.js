@@ -358,9 +358,31 @@ export function renderPageStrip() {
 
 // ---- Layers ----
 
-function layerRow(element, { dimmed = false } = {}) {
+// Layer groups are an editor organization aid: an element may carry a
+// `group` name (a schema field the renderer ignores). The panel renders
+// each section topmost-first, inserts a collapsible band wherever a
+// group run starts, and rows can be dragged by their grip to reorder
+// (z-order) or to move between groups.
+const collapsedLayerGroups = new Set();
+let layerDrag = null;
+
+function layerScopeElements(scope) {
+  if (scope === "shared") return S.layout?.sharedElements || [];
+  return activePage()?.elements || [];
+}
+
+function layerGroupNames() {
+  const names = new Set();
+  for (const el of activePage()?.elements || []) if (el.group) names.add(el.group);
+  for (const el of S.layout?.sharedElements || []) if (el.group) names.add(el.group);
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+function layerRow(element, { dimmed = false, scope = "page" } = {}) {
   const row = document.createElement("div");
   row.className = `layer-row${element.id === S.selectedId ? " selected" : ""}${element.visible ? "" : " hidden-layer"}${dimmed ? " not-on-page" : ""}`;
+  row.dataset.layerId = element.id;
+  row.dataset.layerScope = scope;
   row.onclick = () => {
     S.selectedId = element.id;
     renderAll();
@@ -368,6 +390,10 @@ function layerRow(element, { dimmed = false } = {}) {
     // so the selection is visible (main.js only acts on small screens).
     document.dispatchEvent(new CustomEvent("yello:show-canvas"));
   };
+  const grip = document.createElement("span");
+  grip.className = "layer-grip";
+  grip.title = "Drag to reorder, or drop into a group";
+  grip.addEventListener("pointerdown", (event) => startLayerDrag(event, row, element, scope));
   const type = document.createElement("span");
   type.className = "layer-type";
   type.innerHTML = icon(TYPE_META[element.type].icon);
@@ -388,8 +414,179 @@ function layerRow(element, { dimmed = false } = {}) {
     event.stopPropagation();
     commit(() => { element.locked = !element.locked; });
   };
-  row.append(type, name, visibility, lock);
+  row.append(grip, type, name, visibility, lock);
   return row;
+}
+
+function layerGroupBand(scope, group, count) {
+  const band = document.createElement("div");
+  band.className = "layer-group-band";
+  band.dataset.layerGroup = group;
+  band.dataset.layerScope = scope;
+  const key = `${scope}:${group}`;
+  const collapsed = collapsedLayerGroups.has(key);
+  const toggle = () => {
+    if (collapsedLayerGroups.has(key)) collapsedLayerGroups.delete(key);
+    else collapsedLayerGroups.add(key);
+    renderLayers();
+  };
+  const chevron = document.createElement("button");
+  chevron.className = `layer-band-chevron${collapsed ? " collapsed" : ""}`;
+  chevron.innerHTML = icon("chev-down");
+  chevron.title = collapsed ? "Expand group" : "Collapse group";
+  chevron.onclick = toggle;
+  const label = document.createElement("span");
+  label.className = "layer-band-name";
+  label.textContent = group;
+  label.title = `${group} — click to ${collapsed ? "expand" : "collapse"}`;
+  label.onclick = toggle;
+  const countEl = document.createElement("span");
+  countEl.className = "layer-band-count";
+  countEl.textContent = String(count);
+  const ungroup = document.createElement("button");
+  ungroup.innerHTML = icon("x");
+  ungroup.title = `Ungroup all blocks in "${group}"`;
+  ungroup.onclick = () => commit(() => {
+    for (const el of layerScopeElements(scope)) if (el.group === group) delete el.group;
+  });
+  band.append(chevron, label, countEl, ungroup);
+  return band;
+}
+
+// Append one section's display items (group bands + rows, topmost first).
+function appendLayerSection(list, elements, scope, dimmedFor) {
+  const display = [...elements].reverse();
+  let i = 0;
+  while (i < display.length) {
+    const element = display[i];
+    if (element.group) {
+      const group = element.group;
+      let j = i;
+      while (j < display.length && display[j].group === group) j++;
+      list.append(layerGroupBand(scope, group, j - i));
+      if (!collapsedLayerGroups.has(`${scope}:${group}`)) {
+        for (let k = i; k < j; k++) list.append(layerRow(display[k], { scope, dimmed: Boolean(dimmedFor?.(display[k])) }));
+      }
+      i = j;
+    } else {
+      list.append(layerRow(element, { scope, dimmed: Boolean(dimmedFor?.(element)) }));
+      i++;
+    }
+  }
+}
+
+// ---- Layer drag reorder ----
+
+function startLayerDrag(event, row, element, scope) {
+  if (event.button !== undefined && event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const list = $("layer-list");
+  // Snapshot this section's items (bands + rows) in display order,
+  // excluding the dragged row. Positions are captured once: the dragged
+  // row keeps its layout box while dragging (it only transforms), so
+  // sibling geometry stays valid for the whole gesture.
+  const items = [];
+  list.querySelectorAll(`[data-layer-scope="${scope}"]`).forEach((node) => {
+    if (node === row) return;
+    const rect = node.getBoundingClientRect();
+    items.push({
+      top: rect.top, bottom: rect.bottom, mid: rect.top + rect.height / 2,
+      kind: node.classList.contains("layer-group-band") ? "band" : "row",
+      group: node.dataset.layerGroup || null,
+      id: node.dataset.layerId || null,
+    });
+  });
+  const rowRect = row.getBoundingClientRect();
+  layerDrag = {
+    element, scope, row, items,
+    startY: event.clientY, originTop: rowRect.top,
+    moved: false, insertRowIndex: -1, aboveItem: null,
+  };
+  window.addEventListener("pointermove", onLayerDragMove);
+  window.addEventListener("pointerup", onLayerDragEnd, { once: true });
+}
+
+function onLayerDragMove(event) {
+  const drag = layerDrag;
+  if (!drag) return;
+  const dy = event.clientY - drag.startY;
+  if (!drag.moved && Math.abs(dy) < 5) return;
+  drag.moved = true;
+  drag.row.classList.add("dragging");
+  drag.row.style.transform = `translateY(${dy}px)`;
+  const rows = drag.items.filter((it) => it.kind === "row");
+  let insert = rows.length;
+  for (let i = 0; i < rows.length; i++) {
+    if (event.clientY < rows[i].mid) { insert = i; break; }
+  }
+  drag.insertRowIndex = insert;
+  let above = null;
+  for (const it of drag.items) if (event.clientY >= it.bottom - 2) above = it;
+  drag.aboveItem = above;
+  const list = $("layer-list");
+  const listRect = list.getBoundingClientRect();
+  let line = $("layer-drop-line");
+  if (!line) {
+    line = document.createElement("div");
+    line.id = "layer-drop-line";
+    line.className = "layer-drop-line";
+    list.append(line);
+  }
+  const y = above ? above.bottom : (drag.items[0]?.top ?? event.clientY);
+  line.style.top = `${y - listRect.top + list.scrollTop - 1}px`;
+  line.style.display = "block";
+}
+
+function onLayerDragEnd() {
+  window.removeEventListener("pointermove", onLayerDragMove);
+  const drag = layerDrag;
+  layerDrag = null;
+  const line = $("layer-drop-line");
+  if (line) line.style.display = "none";
+  if (!drag) return;
+  drag.row.classList.remove("dragging");
+  drag.row.style.transform = "";
+  if (!drag.moved || drag.insertRowIndex < 0) return;
+
+  const { element, scope } = drag;
+  const elements = layerScopeElements(scope);
+  const displayIds = [...elements].reverse().map((el) => el.id);
+  const visibleRowIds = drag.items.filter((it) => it.kind === "row").map((it) => it.id);
+  const fromIndex = displayIds.indexOf(element.id);
+  if (fromIndex < 0) return;
+  displayIds.splice(fromIndex, 1);
+  // Insert relative to the visible anchor row so members of collapsed
+  // groups keep their places in the full order.
+  let insertAt;
+  if (drag.insertRowIndex >= visibleRowIds.length) {
+    const lastVisible = visibleRowIds[visibleRowIds.length - 1];
+    insertAt = lastVisible ? displayIds.indexOf(lastVisible) + 1 : displayIds.length;
+  } else {
+    insertAt = displayIds.indexOf(visibleRowIds[drag.insertRowIndex]);
+  }
+  if (insertAt < 0) insertAt = displayIds.length;
+  displayIds.splice(insertAt, 0, element.id);
+  // The item directly above the drop point decides the group: a band
+  // means "into that group", a grouped row means its group, anything
+  // else means ungrouped.
+  let group = null;
+  const above = drag.aboveItem;
+  if (above) {
+    if (above.kind === "band") group = above.group;
+    else if (above.id) group = elements.find((el) => el.id === above.id)?.group || null;
+  }
+  const newOrder = [...displayIds].reverse();
+  const orderChanged = newOrder.some((id, i) => elements[i]?.id !== id);
+  const groupChanged = (element.group || null) !== group;
+  if (!orderChanged && !groupChanged) return;
+  const byId = new Map(elements.map((el) => [el.id, el]));
+  commit(() => {
+    const reordered = newOrder.map((id) => byId.get(id));
+    elements.splice(0, elements.length, ...reordered);
+    if (group) element.group = group;
+    else delete element.group;
+  });
 }
 
 export function renderLayers() {
@@ -408,17 +605,42 @@ export function renderLayers() {
   pageHeading.className = "layer-group-heading";
   pageHeading.textContent = `Page · ${page?.name || ""}`;
   list.append(pageHeading);
-  [...(page?.elements || [])].reverse().forEach((element) => list.append(layerRow(element)));
+  appendLayerSection(list, page?.elements || [], "page", null);
 
   if (shared.length) {
     const sharedHeading = document.createElement("div");
     sharedHeading.className = "layer-group-heading";
     sharedHeading.textContent = "Shared blocks (opt-in per page)";
     list.append(sharedHeading);
-    [...shared].reverse().forEach((element) => {
-      list.append(layerRow(element, { dimmed: !(element.pages || []).includes(page?.id) }));
-    });
+    appendLayerSection(list, shared, "shared", (el) => !(el.pages || []).includes(page?.id));
   }
+  wireLayerGroupButton();
+}
+
+function wireLayerGroupButton() {
+  const button = $("layer-group-new");
+  if (!button || button.dataset.wired) return;
+  button.dataset.wired = "1";
+  button.onclick = async () => {
+    const element = selected();
+    if (!element) {
+      toast("Select a block first, then put it in a group.");
+      return;
+    }
+    const name = await appPrompt({
+      title: "Layer group",
+      message: "Grouped blocks sit together in the Layers panel. Drag a block's grip to reorder it or drop it into another group.",
+      inputLabel: "Group name (blank removes the group)",
+      inputValue: element.group || "",
+      confirmLabel: "Save",
+    });
+    if (name === null) return;
+    commit(() => {
+      const group = name.trim();
+      if (group) element.group = group;
+      else delete element.group;
+    });
+  };
 }
 
 // ---- Canvas overlay ----
@@ -612,6 +834,10 @@ export function renderInspector() {
   const container = $("inspector");
   const element = selected();
   $("duplicate").disabled = !element;
+  // Rebuilding the fields while one of them holds focus makes Chromium
+  // throw inside replaceChildren (the node vanishes mid-blur). Blur
+  // first so the focus change settles before the rebuild.
+  if (container.contains(document.activeElement)) document.activeElement.blur();
   if (!element) {
     container.className = "inspector-empty";
     container.innerHTML = `<div class="empty-icon">${icon("pointer")}</div><p>Select a block on the canvas or in Layers.</p>`;
@@ -621,6 +847,21 @@ export function renderInspector() {
   container.className = "inspector-fields";
   container.replaceChildren();
   appendField(container, "Name", element.name, { type: "text" }, (value) => { element.name = value; });
+  const groupInput = appendField(container, "Group", element.group || "", { type: "text" }, (value) => {
+    const group = String(value).trim();
+    if (group) element.group = group;
+    else delete element.group;
+  });
+  groupInput.setAttribute("list", "layer-group-options");
+  groupInput.placeholder = "No group";
+  const groupOptions = document.createElement("datalist");
+  groupOptions.id = "layer-group-options";
+  for (const name of layerGroupNames()) {
+    const option = document.createElement("option");
+    option.value = name;
+    groupOptions.append(option);
+  }
+  container.append(groupOptions);
 
   const coordinateGrid = document.createElement("div");
   coordinateGrid.className = "coordinate-grid";

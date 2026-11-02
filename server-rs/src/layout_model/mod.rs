@@ -851,8 +851,13 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                 let el_name = v.string(element.get("name"), &format!("{path}.name"), def_name, 100);
                 let visible = element.get("visible").and_then(|v| v.as_bool()).unwrap_or(true);
                 let locked = element.get("locked").and_then(|v| v.as_bool()).unwrap_or(false);
+                // Editor-only organization: the Layers panel groups
+                // elements by this label. Rendering ignores it; the key
+                // is omitted entirely when empty so ungrouped designs
+                // stay byte-identical.
+                let group = v.string(element.get("group"), &format!("{path}.group"), "", 40);
 
-                result["elements"].as_array_mut().unwrap().push(json!({
+                let mut el_obj = json!({
                     "id": id,
                     "type": etype,
                     "name": el_name,
@@ -861,7 +866,11 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                     "frame": frame,
                     "style": Value::Object(style),
                     "props": props
-                }));
+                });
+                if !group.is_empty() {
+                    el_obj["group"] = json!(group);
+                }
+                result["elements"].as_array_mut().unwrap().push(el_obj);
             }
         } else {
             v.error("elements", "must be an array");

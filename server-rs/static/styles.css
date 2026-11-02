@@ -110,11 +110,27 @@ button:not(:disabled):hover { border-color: #596275; background: #242a36; }
 }
 .palette-icon { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 5px; background: #262c38; color: var(--accent); font-weight: 800; }
 .layers-section { padding-bottom: 8px; }
-.layer-list { display: flex; flex-direction: column; gap: 3px; }
+.layer-list { display: flex; flex-direction: column; gap: 3px; position: relative; }
 .layer-row {
-  display: grid; grid-template-columns: 28px minmax(0, 1fr) 25px 25px; align-items: center; min-height: 38px;
+  display: grid; grid-template-columns: 14px 28px minmax(0, 1fr) 25px 25px; align-items: center; min-height: 38px;
   border: 1px solid transparent; border-radius: 7px; padding: 0 4px; color: #c8cfda; cursor: pointer;
 }
+.layer-grip { display: grid; place-items: center; height: 100%; color: var(--muted); cursor: grab; touch-action: none; font-size: 11px; }
+.layer-grip::before { content: "⠿"; }
+.layer-grip:hover { color: var(--text); }
+.layer-row.dragging { background: #232936; border-color: var(--line-strong); box-shadow: 0 6px 18px rgba(0, 0, 0, .45); position: relative; z-index: 3; cursor: grabbing; opacity: .95; }
+.layer-drop-line { position: absolute; left: 4px; right: 4px; height: 2px; background: var(--accent); border-radius: 1px; display: none; pointer-events: none; z-index: 4; }
+.layer-group-band {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 25px; align-items: center; min-height: 26px;
+  padding: 0 4px; margin-top: 4px; border-radius: 6px; background: #181d27; color: #9fb4d8;
+  font-size: 11px; font-weight: 700; letter-spacing: .02em;
+}
+.layer-group-band button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 3px; border-radius: 4px; display: grid; place-items: center; }
+.layer-group-band button:hover { color: var(--text); background: #303644; }
+.layer-band-chevron svg { transition: transform .15s; }
+.layer-band-chevron.collapsed svg { transform: rotate(-90deg); }
+.layer-band-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+.layer-band-count { color: var(--muted); font-weight: 400; margin-right: 2px; }
 .layer-row:hover { background: #1d222c; }
 .layer-row.selected { background: #26291f; border-color: #665c2b; }
 .layer-row.hidden-layer { opacity: .48; }

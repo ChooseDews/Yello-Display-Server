@@ -1,5 +1,6 @@
 //! Bounded, expression-oriented scripts for designer script blocks.
 
+use chrono::{Datelike, Timelike};
 use image::{Rgba, RgbaImage};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -72,6 +73,30 @@ pub const SCRIPT_EXAMPLES: &[ScriptExample] = &[
         name: "Decorative mini chart",
         description: "Shows bounded loops and line drawing without external data.",
         code: "clear(\"#121826\")\nlast_x = 0\nlast_y = height / 2\nfor point in range(1, 13):\n    x = point * width / 12\n    y = height / 2 + sin(point * 0.9) * height * 0.3\n    line(last_x, last_y, x, y, \"#6b9cff\", 2)\n    last_x = x\n    last_y = y\nlabel(5, 5, now(\"%H:%M\"), \"#f2c94c\", 11, \"la\")",
+    },
+    ScriptExample {
+        id: "analog-clock",
+        name: "Analog clock",
+        description: "A clock face with hour and minute hands, drawn from now_part() and trig.",
+        code: "cx = width / 2\ncy = height / 2\nr = min(width, height) / 2 - 4\nclear(\"#0d1420\")\ncircle(cx, cy, r, \"#f2c94c\")\ncircle(cx, cy, r - 3, \"#0d1420\")\nha = (now_part(\"hour\") % 12 + now_part(\"minute\") / 60) / 12 * 6.2832\nma = (now_part(\"minute\") + now_part(\"second\") / 60) / 60 * 6.2832\nline(cx, cy, cx + sin(ha) * r * 0.55, cy - cos(ha) * r * 0.55, \"#f2c94c\", 4)\nline(cx, cy, cx + sin(ma) * r * 0.82, cy - cos(ma) * r * 0.82, \"#ffffff\", 3)\ncircle(cx, cy, 3, \"#f2c94c\")",
+    },
+    ScriptExample {
+        id: "day-ring",
+        name: "Day progress ring",
+        description: "An arc showing how much of the day has passed, with a percentage label.",
+        code: "frac = (now_part(\"hour\") * 3600 + now_part(\"minute\") * 60 + now_part(\"second\")) / 86400\ncx = width / 2\ncy = height / 2\nr = min(width, height) / 2 - 6\nclear(\"#101623\")\narc(cx, cy, r, 0, 360, \"#273447\", 5)\narc(cx, cy, r, 0, frac * 360, \"#6b9cff\", 5)\nlabel(cx, cy, f\"{frac * 100:.0f}%\", \"#ffffff\", 14, \"mm\")",
+    },
+    ScriptExample {
+        id: "lights-on",
+        name: "Lights on counter",
+        description: "Counts Home Assistant lights by state with ha_count().",
+        code: "n = ha_count(\"light\", \"on\")\ntotal = ha_count(\"light\")\nclear(\"#141a26\")\nlabel(width / 2, height / 2 - 10, f\"{n} of {total}\", \"#f2c94c\", 16, \"mm\")\nlabel(width / 2, height / 2 + 10, \"lights on\", \"#ffffff\", 8, \"mm\")",
+    },
+    ScriptExample {
+        id: "week-strip",
+        name: "Week strip",
+        description: "Seven day boxes with today highlighted, using now_part() and substr().",
+        code: "days = \"MTWTFSS\"\nwd = now_part(\"weekday\")\nclear(\"#101623\")\ncell = width / 7\nfor i in range(7):\n    x = i * cell\n    if i == wd:\n        rect(x + 2, 6, cell - 4, height - 12, \"#f2c94c\", 5)\n        label(x + cell / 2, height / 2, substr(days, i, 1), \"#141414\", 11, \"mm\")\n    else:\n        rect(x + 2, 6, cell - 4, height - 12, \"#273447\", 5)\n        label(x + cell / 2, height / 2, substr(days, i, 1), \"#ffffff\", 11, \"mm\")",
     },
 ];
 
@@ -677,6 +702,75 @@ impl<'a> Runtime<'a> {
                 if args.len() != 1 { return Err(ScriptError::Error("lower() expects 1 arg".into())); }
                 Ok(Val::Str(args[0].to_string().to_lowercase()))
             }
+            "substr" => {
+                if args.len() < 2 || args.len() > 3 { return Err(ScriptError::Error("substr() expects text, start, [length]".into())); }
+                let text = args[0].to_string();
+                let chars: Vec<char> = text.chars().collect();
+                let start = (args[1].to_f64()? as i64).clamp(0, chars.len() as i64) as usize;
+                let len = if args.len() == 3 { (args[2].to_f64()? as i64).max(0) as usize } else { chars.len() };
+                Ok(Val::Str(chars.iter().skip(start).take(len).collect()))
+            }
+            "pad" => {
+                if args.len() < 2 || args.len() > 3 { return Err(ScriptError::Error("pad() expects text, width, [fill]".into())); }
+                let text = args[0].to_string();
+                let width = (args[1].to_f64()? as i64).max(0) as usize;
+                let fill = if args.len() == 3 { args[2].to_string().chars().next().unwrap_or(' ') } else { ' ' };
+                let count = text.chars().count();
+                if count >= width { Ok(Val::Str(text)) } else { Ok(Val::Str(format!("{}{}", fill.to_string().repeat(width - count), text))) }
+            }
+            "rpad" => {
+                if args.len() < 2 || args.len() > 3 { return Err(ScriptError::Error("rpad() expects text, width, [fill]".into())); }
+                let text = args[0].to_string();
+                let width = (args[1].to_f64()? as i64).max(0) as usize;
+                let fill = if args.len() == 3 { args[2].to_string().chars().next().unwrap_or(' ') } else { ' ' };
+                let count = text.chars().count();
+                if count >= width { Ok(Val::Str(text)) } else { Ok(Val::Str(format!("{}{}", text, fill.to_string().repeat(width - count)))) }
+            }
+            "replace" => {
+                if args.len() != 3 { return Err(ScriptError::Error("replace() expects text, from, to".into())); }
+                let text = args[0].to_string();
+                let from = args[1].to_string();
+                if from.is_empty() { return Ok(Val::Str(text)); }
+                Ok(Val::Str(text.replace(&from, &args[2].to_string())))
+            }
+            "text_width" => {
+                if args.len() < 1 || args.len() > 2 { return Err(ScriptError::Error("text_width() expects text, [size]".into())); }
+                let size = if args.len() == 2 { args[1].to_f64()?.round().max(1.0) as u32 } else { 16 };
+                Ok(Val::Num(label_metrics(&args[0].to_string(), size).1 as f64))
+            }
+            "now_part" => {
+                if args.len() != 1 { return Err(ScriptError::Error("now_part() expects one part name".into())); }
+                let now = chrono::Utc::now().with_timezone(&crate::renderer::studio_timezone());
+                let value = match args[0].to_string().as_str() {
+                    "year" => now.year() as f64,
+                    "month" => now.month() as f64,
+                    "day" => now.day() as f64,
+                    "hour" => now.hour() as f64,
+                    "minute" => now.minute() as f64,
+                    "second" => now.second() as f64,
+                    "weekday" => now.weekday().num_days_from_monday() as f64,
+                    other => return Err(ScriptError::Error(format!("now_part() unknown part: {other} (use year, month, day, hour, minute, second, weekday)"))),
+                };
+                Ok(Val::Num(value))
+            }
+            "ha_count" => {
+                if args.is_empty() || args.len() > 2 { return Err(ScriptError::Error("ha_count() expects a domain and optional state".into())); }
+                let prefix = format!("{}.", args[0].to_string());
+                let want_state = if args.len() == 2 { Some(args[1].to_string()) } else { None };
+                let mut count = 0;
+                if let Some(entities) = self.context.get("homeAssistant").and_then(|h| h.as_object()) {
+                    for (id, ent) in entities {
+                        if !id.starts_with(&prefix) { continue; }
+                        if ent.get("error").and_then(|v| v.as_bool()) == Some(true) { continue; }
+                        if let Some(want) = &want_state {
+                            let state = ent.get("state").and_then(|s| s.as_str()).unwrap_or("");
+                            if state != want { continue; }
+                        }
+                        count += 1;
+                    }
+                }
+                Ok(Val::Num(count as f64))
+            }
             "rgb" => {
                 if args.len() != 3 { return Err(ScriptError::Error("rgb() expects r, g, b".into())); }
                 let ch = |v: &Val| -> Result<u8, ScriptError> {
@@ -738,6 +832,50 @@ impl<'a> Runtime<'a> {
                 let col = self.parse_color(&args[3])?;
 
                 self.draw_circle(cx, cy, r, col);
+                self.drew = true;
+                Ok(Val::Nil)
+            }
+            "arc" => {
+                if args.len() < 6 || args.len() > 7 {
+                    return Err(ScriptError::Error("arc() expects cx, cy, radius, from_deg, to_deg, color, [width]".into()));
+                }
+                let cx = args[0].to_f64()?.round() as i32;
+                let cy = args[1].to_f64()?.round() as i32;
+                let r = args[2].to_f64()?.round() as i32;
+                let from = args[3].to_f64()?;
+                let to = args[4].to_f64()?;
+                let col = self.parse_color(&args[5])?;
+                let width = if args.len() == 7 { args[6].to_f64()?.round() as i32 } else { 3 };
+                self.draw_arc(cx, cy, r, from, to, col, width);
+                self.drew = true;
+                Ok(Val::Nil)
+            }
+            "triangle" => {
+                if args.len() != 7 {
+                    return Err(ScriptError::Error("triangle() expects x1, y1, x2, y2, x3, y3, color".into()));
+                }
+                let p = |i: usize| -> Result<(i32, i32), ScriptError> {
+                    Ok((args[i].to_f64()?.round() as i32, args[i + 1].to_f64()?.round() as i32))
+                };
+                let (x1, y1) = p(0)?;
+                let (x2, y2) = p(2)?;
+                let (x3, y3) = p(4)?;
+                let col = self.parse_color(&args[6])?;
+                self.draw_triangle(x1, y1, x2, y2, x3, y3, col);
+                self.drew = true;
+                Ok(Val::Nil)
+            }
+            "vgrad" => {
+                if args.len() != 6 {
+                    return Err(ScriptError::Error("vgrad() expects x, y, w, h, top_color, bottom_color".into()));
+                }
+                let x = args[0].to_f64()?.round() as i32;
+                let y = args[1].to_f64()?.round() as i32;
+                let w = args[2].to_f64()?.round() as i32;
+                let h = args[3].to_f64()?.round() as i32;
+                let top = self.parse_color(&args[4])?;
+                let bottom = self.parse_color(&args[5])?;
+                self.draw_vgrad(x, y, w, h, top, bottom);
                 self.drew = true;
                 Ok(Val::Nil)
             }
@@ -828,6 +966,60 @@ impl<'a> Runtime<'a> {
                 err += dx;
                 y0 += sy;
             }
+        }
+    }
+
+    /// Strokes an arc. Angles are degrees, 0 = up (12 o'clock),
+    /// increasing clockwise — clock-face convention, so
+    /// arc(cx, cy, r, 0, frac * 360, ...) draws a progress ring from
+    /// the top. Drawn by stamping filled circles along the path.
+    fn draw_arc(&mut self, cx: i32, cy: i32, r: i32, from_deg: f64, to_deg: f64, col: Rgba<u8>, width: i32) {
+        if r <= 0 { return; }
+        let sweep = to_deg - from_deg;
+        let steps = ((sweep.abs() * std::f64::consts::PI / 180.0) * r as f64).ceil() as i32;
+        let steps = steps.clamp(1, 720);
+        let stamp = (width / 2).max(1);
+        for i in 0..=steps {
+            let a = (from_deg + sweep * (i as f64 / steps as f64)).to_radians();
+            let x = cx + (r as f64 * a.sin()).round() as i32;
+            let y = cy - (r as f64 * a.cos()).round() as i32;
+            self.draw_circle(x, y, stamp, col);
+        }
+    }
+
+    /// Filled triangle via bounding-box scan with edge functions.
+    fn draw_triangle(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, col: Rgba<u8>) {
+        let min_x = x1.min(x2).min(x3).max(0);
+        let max_x = x1.max(x2).max(x3).min(self.width as i32 - 1);
+        let min_y = y1.min(y2).min(y3).max(0);
+        let max_y = y1.max(y2).max(y3).min(self.height as i32 - 1);
+        if min_x > max_x || min_y > max_y { return; }
+        let edge = |ax: i32, ay: i32, bx: i32, by: i32, px: i32, py: i32| -> i64 {
+            (bx as i64 - ax as i64) * (py as i64 - ay as i64) - (by as i64 - ay as i64) * (px as i64 - ax as i64)
+        };
+        let area = edge(x1, y1, x2, y2, x3, y3);
+        if area == 0 { return; }
+        for py in min_y..=max_y {
+            for px in min_x..=max_x {
+                let w0 = edge(x2, y2, x3, y3, px, py);
+                let w1 = edge(x3, y3, x1, y1, px, py);
+                let w2 = edge(x1, y1, x2, y2, px, py);
+                let inside = if area > 0 { w0 >= 0 && w1 >= 0 && w2 >= 0 } else { w0 <= 0 && w1 <= 0 && w2 <= 0 };
+                if inside {
+                    self.image.put_pixel(px as u32, py as u32, col);
+                }
+            }
+        }
+    }
+
+    /// Vertical linear gradient: top color at y, bottom color at y+h.
+    fn draw_vgrad(&mut self, x: i32, y: i32, w: i32, h: i32, top: Rgba<u8>, bottom: Rgba<u8>) {
+        if w <= 0 || h <= 0 { return; }
+        for row in 0..h {
+            let t = if h > 1 { row as f32 / (h - 1) as f32 } else { 0.0 };
+            let mix = |a: u8, b: u8| -> u8 { (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8 };
+            let col = Rgba([mix(top.0[0], bottom.0[0]), mix(top.0[1], bottom.0[1]), mix(top.0[2], bottom.0[2]), mix(top.0[3], bottom.0[3])]);
+            self.draw_rect(x, y + row, w, 1, col, 0);
         }
     }
 
@@ -1448,6 +1640,51 @@ mod tests {
             let out = execute_script(ex.code, 200, 60, &context).unwrap();
             assert!(out.text.is_some() || out.image.is_some());
         }
+    }
+
+    #[test]
+    fn test_new_string_time_and_ha_builtins() {
+        let ctx = json!({});
+        let text = |code: &str| execute_script(code, 100, 50, &ctx).unwrap().text;
+        assert_eq!(text("text(substr(\"hello world\", 6, 5))").as_deref(), Some("world"));
+        assert_eq!(text("text(substr(\"hello\", 2))").as_deref(), Some("llo"));
+        assert_eq!(text("text(pad(\"7\", 3))").as_deref(), Some("  7"));
+        assert_eq!(text("text(rpad(\"7\", 3, \".\"))").as_deref(), Some("7.."));
+        assert_eq!(text("text(replace(\"a-b-c\", \"-\", \"+\"))").as_deref(), Some("a+b+c"));
+        assert_eq!(text("text(str(text_width(\"MMMM\", 8)))").as_deref(), Some("32"));
+        assert_eq!(text("if now_part(\"weekday\") >= 0 and now_part(\"weekday\") <= 6 and now_part(\"hour\") < 24:\n    text(\"ok\")").as_deref(), Some("ok"));
+
+        let ha_ctx = json!({"homeAssistant": {
+            "light.kitchen": {"state": "on", "attributes": {}},
+            "light.desk": {"state": "off", "attributes": {}},
+            "light.broken": {"state": "on", "error": true},
+            "switch.fan": {"state": "on", "attributes": {}}
+        }});
+        let count = |code: &str| execute_script(code, 100, 50, &ha_ctx).unwrap().text;
+        assert_eq!(count("text(str(ha_count(\"light\")))").as_deref(), Some("2"));
+        assert_eq!(count("text(str(ha_count(\"light\", \"on\")))").as_deref(), Some("1"));
+        assert_eq!(count("text(str(ha_count(\"fan\")))").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn test_new_drawing_builtins() {
+        let ctx = json!({});
+        // Triangle: (2,2) is inside the (0,0)-(19,0)-(0,19) triangle,
+        // (18,18) is beyond the hypotenuse.
+        let out = execute_script("triangle(0, 0, 19, 0, 0, 19, \"#ff0000\")", 20, 20, &ctx).unwrap();
+        let img = out.image.unwrap();
+        assert_eq!(img.get_pixel(2, 2).0[0], 255);
+        assert_eq!(img.get_pixel(18, 18).0[0], 0);
+        // Arc: a full ring stamps the top point (cx, cy - r).
+        let out = execute_script("arc(10, 10, 8, 0, 360, \"#00ff00\", 3)", 21, 21, &ctx).unwrap();
+        let img = out.image.unwrap();
+        assert_eq!(img.get_pixel(10, 2).0[1], 255);
+        assert_eq!(img.get_pixel(10, 10).0[1], 0);
+        // vgrad: top row is the top color, bottom row the bottom color.
+        let out = execute_script("vgrad(0, 0, 4, 10, \"#000000\", \"#ffffff\")", 4, 10, &ctx).unwrap();
+        let img = out.image.unwrap();
+        assert_eq!(img.get_pixel(0, 0).0[0], 0);
+        assert_eq!(img.get_pixel(0, 9).0[0], 255);
     }
 
     #[test]
