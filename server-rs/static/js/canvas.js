@@ -274,10 +274,12 @@ export function showCodeErrors(errors = []) {
 
 export function syncCodeEditor(force = false) {
   if (!S.layout || (S.codeEditorDirty && !force)) return;
-  $("layout-json").value = JSON.stringify(S.layout, null, 2);
+  // Compact, zero-whitespace JSON by default (Format pretty-prints on demand).
+  $("layout-json").value = JSON.stringify(S.layout);
   S.codeEditorDirty = false;
   showCodeErrors();
   setCodeEditorState("Edit the complete normalized design configuration.");
+  if (!$("code-editor-pane").classList.contains("hidden")) refreshJsonViewer();
 }
 
 function parseCodeEditor() {
@@ -319,8 +321,9 @@ export async function applyCodeLayout() {
     S.selectedId = null;
     S.dirty = true;
     S.codeEditorDirty = false;
-    $("layout-json").value = JSON.stringify(S.layout, null, 2);
+    $("layout-json").value = JSON.stringify(S.layout);
     showCodeErrors();
+    refreshJsonViewer();
     renderAll();
     setCodeEditorState("Valid JSON applied to the visual design", "valid");
     schedulePreview(0);
@@ -332,6 +335,100 @@ export async function applyCodeLayout() {
   } finally {
     $("apply-json").disabled = false;
   }
+}
+
+// ---- JSON viewer: a collapsible tree over the editor's JSON ----
+
+let jsonTab = "viewer";
+
+export function setJsonTab(tab) {
+  jsonTab = tab;
+  $("json-tab-viewer").classList.toggle("active", tab === "viewer");
+  $("json-tab-editor").classList.toggle("active", tab === "editor");
+  $("json-tree-wrap").classList.toggle("hidden", tab !== "viewer");
+  $("layout-json").classList.toggle("hidden", tab !== "editor");
+  if (tab === "viewer") refreshJsonViewer();
+}
+
+export function setAllJsonNodes(open) {
+  document.querySelectorAll("#json-tree .jt-node").forEach((node) => {
+    node.classList.toggle("jt-closed", !open);
+    const toggle = node.querySelector(":scope > .jt-row .jt-toggle:not(.jt-spacer)");
+    if (toggle) toggle.textContent = open ? "▾" : "▸";
+  });
+}
+
+function jsonNode(path, key, value, depth) {
+  const node = document.createElement("div");
+  node.className = "jt-node";
+  const row = document.createElement("div");
+  row.className = "jt-row";
+  const isContainer = value !== null && typeof value === "object";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "jt-toggle";
+  if (isContainer) {
+    const closed = depth >= 2;
+    if (closed) node.classList.add("jt-closed");
+    toggle.textContent = closed ? "▸" : "▾";
+    toggle.setAttribute("aria-label", "Expand or collapse");
+    toggle.onclick = (event) => {
+      event.stopPropagation();
+      node.classList.toggle("jt-closed");
+      toggle.textContent = node.classList.contains("jt-closed") ? "▸" : "▾";
+    };
+  } else {
+    toggle.classList.add("jt-spacer");
+    toggle.disabled = true;
+  }
+  row.append(toggle);
+  const keyEl = document.createElement("span");
+  keyEl.className = "jt-key";
+  keyEl.textContent = key;
+  row.append(keyEl);
+  if (isContainer) {
+    const meta = document.createElement("span");
+    meta.className = "jt-meta";
+    meta.textContent = Array.isArray(value) ? `array · ${value.length}` : `object · ${Object.keys(value).length}`;
+    row.append(meta);
+  } else {
+    const val = document.createElement("span");
+    val.className = `jt-val jt-${value === null ? "null" : typeof value}`;
+    val.textContent = typeof value === "string" ? `"${value}"` : String(value);
+    row.append(val);
+  }
+  row.onclick = () => {
+    document.querySelectorAll(".jt-row.jt-selected").forEach((el) => el.classList.remove("jt-selected"));
+    row.classList.add("jt-selected");
+    $("json-tree-path").textContent = path || "(root)";
+  };
+  node.append(row);
+  if (isContainer) {
+    const children = document.createElement("div");
+    children.className = "jt-children";
+    const entries = Array.isArray(value) ? value.map((v, i) => [String(i), v]) : Object.entries(value);
+    for (const [childKey, childValue] of entries) {
+      const childPath = Array.isArray(value) ? `${path}[${childKey}]` : path ? `${path}.${childKey}` : childKey;
+      children.append(jsonNode(childPath, childKey, childValue, depth + 1));
+    }
+    node.append(children);
+  }
+  return node;
+}
+
+export function refreshJsonViewer() {
+  const tree = $("json-tree");
+  if (!tree) return;
+  const parsed = parseCodeEditor();
+  tree.replaceChildren();
+  if (parsed.errors.length) {
+    const note = document.createElement("div");
+    note.className = "jt-error";
+    note.textContent = `Cannot render the tree: ${parsed.errors[0].message} Fix it in the Editor tab.`;
+    tree.append(note);
+    return;
+  }
+  tree.append(jsonNode("", "Design JSON", parsed.value, 0));
 }
 
 export function formatCodeEditor() {
@@ -369,6 +466,10 @@ export async function setCanvasMode(mode) {
   $("live-mode").classList.toggle("active", mode === "live");
   $("canvas-scroll").classList.toggle("hidden", mode === "code");
   $("code-editor-pane").classList.toggle("hidden", mode !== "code");
+  if (mode === "code") {
+    syncCodeEditor();
+    setJsonTab("viewer");
+  }
   $("flow-canvas").classList.toggle("hidden", !flowVisible);
   $("device-shell").classList.toggle("hidden", flowVisible);
   $("canvas-overlay").classList.toggle("hidden", mode !== "edit");

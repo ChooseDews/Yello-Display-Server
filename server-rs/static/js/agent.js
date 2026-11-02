@@ -91,6 +91,19 @@ export function placeAgent() {
     const card = $(id);
     if (card && card.parentElement !== mount) mount.append(card);
   }
+  // The provider status light follows the agent window: panel head when
+  // docked/floating, chat card head on the Agent page.
+  const pill = $("agent-status-pill");
+  if (pill) {
+    if (docked) {
+      const anchor = $("agent-panel-float");
+      if (pill.parentElement !== anchor.parentElement) anchor.parentElement.insertBefore(pill, anchor);
+    } else {
+      const head = document.querySelector(".agent-chat-head");
+      const tools = head?.querySelector(".agent-head-tools");
+      if (tools && pill.parentElement !== head) head.insertBefore(pill, tools);
+    }
+  }
   document.querySelectorAll('[data-route="agent"]').forEach((link) => {
     link.classList.toggle("active", docked || S.currentPage === "agent");
   });
@@ -692,7 +705,77 @@ function addAssistantTurn() {
   };
 }
 
+// ---------- Dev-mode context graph ----------
+// A stacked bar estimating what the next request's context is made of:
+// system prompt, tool definitions, model thinking, tool calls/results,
+// images, and plain text. Text is estimated at chars/4; images at a flat
+// ~258 tokens each (their real vision cost, not their data-URL length).
+const CONTEXT_SEGMENTS = [
+  { key: "system", label: "System", color: "#6b9cff" },
+  { key: "tools", label: "Tools", color: "#b388ff" },
+  { key: "thinking", label: "Thinking", color: "#4dd0e1" },
+  { key: "toolcalls", label: "Tool calls", color: "#f2c94c" },
+  { key: "images", label: "Images", color: "#f48fb1" },
+  { key: "text", label: "Text", color: "#8a93a5" },
+];
+
+function renderContextGraph() {
+  const bar = $("agent-context-bar");
+  const legend = $("agent-context-legend");
+  if (!bar || !legend) return;
+  const est = (chars) => Math.ceil(chars / 4);
+  const seg = {
+    system: est(SYSTEM_PROMPT.length),
+    tools: est(JSON.stringify(TOOLS).length),
+    thinking: 0,
+    toolcalls: 0,
+    images: 0,
+    text: 0,
+  };
+  for (const message of conversation) {
+    if (message._reasoning) seg.thinking += est(String(message._reasoning).length);
+    if (message.role === "tool") {
+      seg.toolcalls += est(String(message.content ?? "").length);
+      continue;
+    }
+    if (Array.isArray(message.tool_calls)) {
+      for (const call of message.tool_calls) {
+        seg.toolcalls += est((call.function?.name || "").length + (call.function?.arguments || "").length);
+      }
+    }
+    if (typeof message.content === "string") {
+      seg.text += est(message.content.length);
+    } else if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part.type === "text") seg.text += est(part.text.length);
+        else if (part.type === "image_url") seg.images += 258;
+      }
+    }
+  }
+  const total = Object.values(seg).reduce((sum, n) => sum + n, 0);
+  bar.replaceChildren();
+  legend.replaceChildren();
+  for (const { key, label, color } of CONTEXT_SEGMENTS) {
+    const tokens = seg[key];
+    if (total > 0 && tokens > 0) {
+      const slice = document.createElement("span");
+      slice.style.width = `${(tokens / total) * 100}%`;
+      slice.style.background = color;
+      slice.title = `${label}: ≈${tokens.toLocaleString("en-US")} tokens`;
+      bar.append(slice);
+    }
+    const item = document.createElement("span");
+    item.className = "agent-context-item";
+    const dot = document.createElement("span");
+    dot.className = "agent-context-dot";
+    dot.style.background = color;
+    item.append(dot, `${label} ≈${tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : tokens}`);
+    legend.append(item);
+  }
+}
+
 function renderUsage() {
+  renderContextGraph();
   const el = $("agent-usage");
   if (!el) return;
   if (!usageTotals.in && !usageTotals.out) {
@@ -856,10 +939,10 @@ function setModelDropdown(open) {
 function updateProviderUi() {
   const hasKey = Boolean(apiKey());
   const connected = hasKey && modelsLoadOk;
-  // The connection status lives in the top bar, next to the Agent nav.
+  // The connection status light lives in the agent window's own top bar.
   const statusText = connected ? "Connected" : hasKey ? "Key saved" : "Not connected";
-  $("agent-topbar-dot").classList.toggle("connected", connected);
-  const topText = $("agent-topbar-text");
+  $("agent-status-dot").classList.toggle("connected", connected);
+  const topText = $("agent-status-text");
   const baseHost = API_BASE.replace(/^https?:\/\//, "").split("/")[0];
   const providerName = baseHost.includes("openrouter") ? "OpenRouter" : baseHost;
   topText.textContent = `${providerName} · ${statusText}`;
@@ -1417,6 +1500,7 @@ export function initAgentPage() {
     const on = localStorage.getItem("yello-agent-dev") === "1";
     $("agent-chat-card").classList.toggle("agent-dev", on);
     devButton.setAttribute("aria-pressed", String(on));
+    if (on) renderContextGraph();
   };
   devButton.onclick = () => {
     const on = localStorage.getItem("yello-agent-dev") === "1";

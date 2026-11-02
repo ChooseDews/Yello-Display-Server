@@ -27,7 +27,6 @@
         <button id="save" class="primary-button"><span class="save-icon" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-save"></use></svg></span><span class="save-label">Save &amp; apply</span></button>
       </div>
       <div class="topbar-agent">
-        <span id="agent-topbar-status" class="agent-topbar-status" title="OpenRouter connection status"><span id="agent-topbar-dot" class="status-dot"></span><span id="agent-topbar-text">OpenRouter</span></span>
         <button type="button" id="agent-topbar-toggle" class="icon-button agent-topbar-toggle" data-route="agent" title="Agent — chat panel" aria-label="Toggle the Agent panel"><svg class="ic" aria-hidden="true"><use href="#i-bot"></use></svg></button>
       </div>
     </div>
@@ -137,7 +136,19 @@
             <button id="apply-json" type="button" class="primary-button">Apply JSON</button>
           </div>
         </div>
-        <textarea id="layout-json" class="layout-json" aria-label="Layout JSON" spellcheck="false" autocomplete="off"></textarea>
+        <div class="json-tabs">
+          <button id="json-tab-viewer" type="button" class="json-tab active">Viewer</button>
+          <button id="json-tab-editor" type="button" class="json-tab">Editor</button>
+        </div>
+        <div id="json-tree-wrap" class="json-tree-wrap">
+          <div class="json-tree-toolbar">
+            <button id="json-expand-all" type="button" class="text-button">Expand all</button>
+            <button id="json-collapse-all" type="button" class="text-button">Collapse all</button>
+            <span id="json-tree-path" class="json-tree-path">(root)</span>
+          </div>
+          <div id="json-tree" class="json-tree"></div>
+        </div>
+        <textarea id="layout-json" class="layout-json hidden" aria-label="Layout JSON" spellcheck="false" autocomplete="off"></textarea>
         <div id="code-errors" class="code-errors hidden" role="alert"></div>
       </div>
       <div class="canvas-footer">
@@ -302,6 +313,10 @@
           <button id="agent-dev" type="button" class="icon-button agent-dev-button" title="Dev mode: show tool calls and model thinking" aria-label="Toggle dev mode" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-wrench"></use></svg></button>
         </span>
       </div>
+      <div id="agent-context-graph" class="agent-context-graph">
+        <div id="agent-context-bar" class="agent-context-bar"></div>
+        <div id="agent-context-legend" class="agent-context-legend"></div>
+      </div>
       <div id="agent-history-view" class="agent-history hidden">
         <div class="agent-history-head">
           <span class="agent-chat-title">Previous conversations</span>
@@ -352,6 +367,7 @@
     <div id="agent-panel-resize" class="agent-panel-resize" title="Drag to resize the column"></div>
     <div class="agent-panel-head">
       <svg class="ic" aria-hidden="true"><use href="#i-bot"></use></svg> Agent
+      <span id="agent-status-pill" class="agent-status-pill" title="OpenRouter connection status"><span id="agent-status-dot" class="status-dot"></span><span id="agent-status-text">OpenRouter</span></span>
       <button id="agent-panel-float" type="button" class="icon-button" aria-label="Undock the agent panel" title="Undock"><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg></button>
       <button id="agent-panel-close" type="button" class="icon-button" aria-label="Close agent panel"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
     </div>

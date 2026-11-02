@@ -11,6 +11,7 @@ import {
 import {
   setCanvasMode, sendLiveTouch, applyCodeLayout, formatCodeEditor, applyZoom, refreshPreview,
   showCodeErrors, setCodeEditorState, stepZoom, setZoom, initCanvasGestures,
+  setJsonTab, setAllJsonNodes,
 } from "./canvas.js";
 import { setShowConnections, drawFlowArrows } from "./flow.js";
 import {
@@ -184,6 +185,10 @@ function bindEvents() {
   };
   $("format-json").onclick = formatCodeEditor;
   $("apply-json").onclick = () => applyCodeLayout();
+  $("json-tab-viewer").onclick = () => setJsonTab("viewer");
+  $("json-tab-editor").onclick = () => setJsonTab("editor");
+  $("json-expand-all").onclick = () => setAllJsonNodes(true);
+  $("json-collapse-all").onclick = () => setAllJsonNodes(false);
   $("orientation").onchange = (event) => setOrientation(event.target.value);
   $("canvas-menu").querySelectorAll("[data-context-action]").forEach((button) => {
     button.onclick = () => {
