@@ -17,7 +17,7 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; }
-body { background: var(--bg); color: var(--text); font-size: 13px; }
+body { background: var(--bg); color: var(--text); font-size: 13px; display: flex; flex-direction: column; height: 100dvh; }
 button, input, select, textarea { font: inherit; }
 button { color: inherit; }
 
@@ -61,7 +61,7 @@ button:not(:disabled):hover { border-color: #596275; background: #242a36; }
 }
 .primary-button:not(:disabled):hover { background: #ffdb68; border-color: #ffdf79; }
 
-.workspace { display: grid; grid-template-columns: 246px minmax(420px, 1fr) 310px; height: calc(100vh - var(--header-height)); }
+.workspace { display: grid; grid-template-columns: 246px minmax(420px, 1fr) 310px; flex: 1 1 auto; min-height: 0; }
 .hidden { display: none !important; }
 .panel { background: var(--panel); overflow-y: auto; }
 .left-panel { border-right: 1px solid var(--line); }
@@ -265,7 +265,7 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 @keyframes modal-backdrop-in { from { opacity: 0; } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(6px) scale(.985); } }
 
-.management-page { height: calc(100vh - var(--header-height)); overflow-y: auto; padding: 34px clamp(22px, 5vw, 72px) 70px; background: #101219; }
+.management-page { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 34px clamp(22px, 5vw, 72px) 70px; background: #101219; }
 .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; max-width: 1280px; margin: 0 auto 26px; }
 .page-heading h1 { margin: 4px 0 8px; font-size: 28px; letter-spacing: -.03em; }
 .page-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
@@ -367,3 +367,95 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 .shared-page-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; }
 .app-modal-options { display: grid; gap: 7px; margin-top: 10px; }
 .app-modal-option { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+
+/* ---- MCP settings card ---- */
+.settings-card + .settings-card { margin-top: 18px; }
+.mcp-body { padding-top: 18px; display: grid; gap: 10px; }
+.mcp-body p { margin: 0; color: #b1b9c7; font-size: 12px; line-height: 1.6; }
+.mcp-body code { font-family: ui-monospace, monospace; font-size: 11px; color: var(--accent); }
+.mcp-config {
+  margin: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px;
+  background: #0b0d12; color: #d9e1ee; font-family: ui-monospace, monospace;
+  font-size: 11px; line-height: 1.55; overflow-x: auto;
+}
+
+/* ---- Mobile: one panel at a time, bottom tab bar ---- */
+.mobile-tabs { display: none; }
+
+@media (pointer: coarse) {
+  .resize-handle { width: 11px; height: 11px; }
+}
+
+@media (max-width: 860px) {
+  .app-header { height: auto; flex-wrap: wrap; padding: 8px 10px; row-gap: 6px; }
+  .main-nav { order: 3; width: 100%; margin: 0; align-self: auto; overflow-x: auto; gap: 4px; }
+  .main-nav a { font-size: 12px; padding: 7px 11px; white-space: nowrap; border-bottom: 0; border-radius: 999px; background: var(--panel-2); }
+  .main-nav a::first-letter { font-size: 12px; }
+  .main-nav a.active { background: var(--accent); color: #191507; font-weight: 700; }
+  .header-actions { margin-left: auto; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .deployment-controls label { display: grid; font-size: 0; gap: 0; }
+  .deployment-controls select { width: 96px; min-height: 34px; }
+  .deployment-controls .icon-button { width: 34px; height: 34px; }
+  .icon-button { width: 36px; height: 36px; }
+  .primary-button { height: 38px; }
+
+  .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .workspace .left-panel, .workspace .right-panel { display: none; border: 0; padding-bottom: 84px; }
+  body[data-mobile-panel="blocks"] .left-panel { display: block; }
+  body[data-mobile-panel="design"] .right-panel { display: block; }
+  body[data-mobile-panel="blocks"] .canvas-area,
+  body[data-mobile-panel="design"] .canvas-area { display: none; }
+
+  body.route-designer .mobile-tabs {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; gap: 6px;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    background: #11141af2; border-top: 1px solid var(--line);
+  }
+  .mobile-tabs button {
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 7px 0 5px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel-2); color: var(--muted); font-size: 10px; cursor: pointer;
+  }
+  .mobile-tabs button span { font-size: 15px; line-height: 1; }
+  .mobile-tabs button.active { background: var(--accent); border-color: #c99f20; color: #191507; font-weight: 700; }
+
+  .canvas-area { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+  .canvas-toolbar { flex-wrap: wrap; height: auto; padding: 6px 8px; gap: 6px; }
+  .screen-size span { display: none; }
+  .view-toggle button { min-width: 0; height: 31px; padding: 0 11px; font-size: 11px; }
+  .connections-toggle { height: 31px; }
+  .zoom-control button { width: 36px; height: 31px; }
+  .page-strip { flex-wrap: nowrap; overflow-x: auto; padding: 6px 8px; }
+  .page-tab { padding: 8px 13px; white-space: nowrap; }
+  .page-actions { position: sticky; right: 0; padding-left: 6px; background: var(--panel); }
+  .page-actions button { padding: 7px 9px; }
+  .canvas-scroll { padding: 16px 10px 84px; align-items: flex-start; }
+  .canvas-footer { display: none; }
+  .flow-canvas { gap: 36px 20px; padding: 4px; }
+  .code-editor-pane { padding: 10px; }
+  .code-editor-heading { flex-wrap: wrap; }
+
+  .palette-grid button { min-height: 50px; }
+  .layer-row { min-height: 46px; }
+  .screen-card { min-height: 54px; }
+  input, select, textarea { font-size: 16px; min-height: 40px; }
+  .deployment-controls select { font-size: 12px; }
+  .inspector-actions button { min-height: 42px; }
+  .shared-toggle { padding: 10px 8px; }
+  .shared-page-row { padding: 7px 0; }
+  .shared-page-row input { flex: 0 0 auto; width: 20px; min-height: 20px; }
+
+  .management-page { padding: 20px 14px 60px; }
+  .page-heading { flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 18px; }
+  .page-heading h1 { font-size: 23px; }
+  .design-card { grid-template-columns: 1fr; }
+  .design-preview-wrap { border-right: 0; border-bottom: 1px solid var(--line); }
+  .settings-card { padding: 16px; }
+  .toast-region { left: 12px; right: 12px; bottom: 78px; align-items: stretch; }
+  .app-modal-backdrop { padding: 12px; }
+  .app-modal { grid-template-columns: 1fr; gap: 8px; }
+  .app-modal-mark { display: none; }
+  .app-modal form { grid-column: 1; }
+  .canvas-menu { width: 204px; }
+  .canvas-menu button { padding: 10px 9px; }
+}

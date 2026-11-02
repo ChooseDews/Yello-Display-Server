@@ -346,6 +346,9 @@ function layerRow(element, { dimmed = false } = {}) {
   row.onclick = () => {
     S.selectedId = element.id;
     renderAll();
+    // On phones the layers live in a separate panel; jump to the canvas
+    // so the selection is visible (main.js only acts on small screens).
+    document.dispatchEvent(new CustomEvent("yello:show-canvas"));
   };
   const type = document.createElement("span");
   type.className = "layer-type";

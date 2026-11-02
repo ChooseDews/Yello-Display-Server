@@ -19,6 +19,7 @@ export function pageFromPath() {
 
 export function showPage(page, push = false) {
   S.currentPage = page;
+  document.body.classList.toggle("route-designer", page === "designer");
   for (const name of ["designer", "devices", "designs", "settings"]) {
     $(`${name}-page`).classList.toggle("hidden", name !== page);
   }

@@ -20,6 +20,7 @@ export function switchEditingNode(designId, pageId) {
   S.selectedId = null;
   S.dirty = S.flowDirty.has(designId);
   renderAll();
+  document.dispatchEvent(new CustomEvent("yello:show-canvas"));
   if (S.canvasMode === "edit" && S.flowMode) {
     $("preview-status").textContent = `Flow view · editing ${designNameOf(designId)} · ${pageNameOf(S.layout, activePageIdFor(designId))}`;
   }

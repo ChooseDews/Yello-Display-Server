@@ -161,6 +161,12 @@
         <div id="resource-editor"></div>
       </section>
     </aside>
+
+    <nav id="mobile-tabs" class="mobile-tabs" aria-label="Editor panels">
+      <button type="button" data-mobile-panel="canvas" class="active"><span aria-hidden="true">▦</span>Canvas</button>
+      <button type="button" data-mobile-panel="blocks"><span aria-hidden="true">▤</span>Blocks</button>
+      <button type="button" data-mobile-panel="design"><span aria-hidden="true">✎</span>Design</button>
+    </nav>
   </main>
 
   <main id="devices-page" class="management-page hidden">
@@ -201,6 +207,19 @@
           <span id="ha-settings-result" class="subtle"></span>
         </div>
       </form>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo">AI</div>
+        <div><h2>Agent access (MCP)</h2><p>Let an MCP client list, edit, and preview screen designs directly.</p></div>
+        <span class="integration-badge connected">Built in</span>
+      </div>
+      <div class="mcp-body">
+        <p>Endpoint: <code id="mcp-endpoint">/mcp</code> (POST, Streamable HTTP / JSON-RPC). Tools: <code>yello_list_designs</code>, <code>yello_get_design</code>, <code>yello_save_design</code>, <code>yello_validate_design</code>, <code>yello_preview_design</code>, <code>yello_list_screens</code>, <code>yello_assign_design</code>, <code>yello_status</code>. Saves are validated like Studio saves and pushed to assigned screens. Like the rest of the Studio API it has no login — keep it on your LAN or tailnet.</p>
+        <p class="form-help">Client config:</p>
+        <pre id="mcp-config" class="mcp-config"></pre>
+      </div>
     </section>
   </main>
 

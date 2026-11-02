@@ -1,6 +1,6 @@
 // Studio entry point: event wiring, keyboard shortcuts, boot.
 
-import { $, ZOOM_LEVELS } from "./util.js";
+import { $, ZOOM_LEVELS, isNarrowScreen } from "./util.js";
 import { S, displayWidth, displayHeight, activePage, effectiveElements, activePageIdFor } from "./state.js";
 import { toast, isModalOpen, closeAppModal, submitAppModal, appConfirm } from "./dialog.js";
 import { commit, undo, redo, setDocumentState } from "./history.js";
@@ -56,6 +56,15 @@ function handleKeyboard(event) {
   }
 }
 
+// Phones get one panel at a time (canvas / blocks / design) switched by
+// the bottom tab bar; desktop ignores data-mobile-panel entirely.
+export function setMobilePanel(name) {
+  document.body.dataset.mobilePanel = name;
+  document.querySelectorAll(".mobile-tabs [data-mobile-panel]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.mobilePanel === name);
+  });
+}
+
 function bindEvents() {
   document.querySelectorAll("[data-route]").forEach((link) => {
     link.onclick = (event) => {
@@ -65,7 +74,16 @@ function bindEvents() {
   });
   window.onpopstate = () => showPage(pageFromPath());
   document.querySelectorAll("[data-add-type]").forEach((button) => {
-    button.onclick = () => addElement(button.dataset.addType);
+    button.onclick = () => {
+      addElement(button.dataset.addType);
+      if (isNarrowScreen()) setMobilePanel("canvas");
+    };
+  });
+  document.querySelectorAll(".mobile-tabs [data-mobile-panel]").forEach((button) => {
+    button.onclick = () => setMobilePanel(button.dataset.mobilePanel);
+  });
+  document.addEventListener("yello:show-canvas", () => {
+    if (isNarrowScreen()) setMobilePanel("canvas");
   });
   $("add-shared-toggle").onclick = () => {
     S.addAsShared = !S.addAsShared;
@@ -197,6 +215,14 @@ async function initialize() {
     S.designRevisions.set(S.currentDesignId, loaded.revision);
     S.activePages.set(S.currentDesignId, activePageIdFor(S.currentDesignId));
     bindEvents();
+    setMobilePanel("canvas");
+    if (isNarrowScreen()) S.zoomIndex = 0;
+    const mcpUrl = `${window.location.origin}/mcp`;
+    if ($("mcp-endpoint")) $("mcp-endpoint").textContent = mcpUrl;
+    if ($("mcp-config")) {
+      $("mcp-config").textContent = JSON.stringify(
+        { mcpServers: { yello: { url: mcpUrl } } }, null, 2);
+    }
     applyZoom();
     renderStudioControls();
     renderAll();

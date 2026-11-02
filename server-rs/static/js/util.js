@@ -1,6 +1,12 @@
 // Small DOM and formatting helpers shared by every Studio module.
 
 export const $ = (id) => document.getElementById(id);
+
+// Small-screen check (phones): the editor switches to one panel at a
+// time there. Guarded for environments without matchMedia.
+export const isNarrowScreen = () =>
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(max-width: 860px)").matches;
 export const clone = (value) => structuredClone(value);
 
 export const PORTRAIT_WIDTH = 240;
