@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yello — live screen</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #000; color: #e8eaf0;
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #frame {
+    max-width: 100vw; max-height: 100vh; width: auto; height: auto;
+    object-fit: contain; display: block; background: #000;
+  }
+  #badge {
+    position: fixed; left: 10px; bottom: 10px;
+    display: inline-flex; align-items: center; gap: 7px;
+    background: rgba(16, 18, 24, .72); border: 1px solid rgba(255,255,255,.14);
+    padding: 5px 10px; border-radius: 999px; backdrop-filter: blur(4px);
+    user-select: none; pointer-events: none; white-space: nowrap;
+    max-width: calc(100vw - 20px); overflow: hidden; text-overflow: ellipsis;
+  }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #8a93a5; flex: none; }
+  #dot.live { background: #3ddc84; box-shadow: 0 0 8px rgba(61,220,132,.8); }
+  #dot.preview { background: #f2c94c; }
+  #dot.down { background: #e5534b; }
+  body.bare #badge { display: none; }
+</style>
+</head>
+<body>
+<img id="frame" alt="Live screen view">
+<div id="badge"><span id="dot"></span><span id="label">Loading…</span></div>
+<script>
+"use strict";
+// Live player for one Yello screen. Usage:
+//   /player?screen=<screenId>            the screen's actual pushed frames
+//   /player?design=<designId>[&page=]    a saved design, rendered live
+//   &interval=<ms>  poll interval (default 1500, min 500)
+//   &bare=1         hide the status badge (for embeds)
+const params = new URLSearchParams(location.search);
+const screenId = params.get("screen");
+const pageId = params.get("page");
+const intervalMs = Math.max(500, Number(params.get("interval")) || 1500);
+if (params.get("bare") === "1") document.body.classList.add("bare");
+
+const img = document.getElementById("frame");
+const dot = document.getElementById("dot");
+const label = document.getElementById("label");
+
+let designId = params.get("design");
+let displayName = screenId || designId || "Screen";
+let blobUrl = null;
+let stopped = false;
+
+function setState(kind, text) {
+  dot.className = kind;
+  label.textContent = text;
+}
+
+async function resolveScreen() {
+  if (!screenId) return;
+  try {
+    const studio = await (await fetch("/api/studio", { cache: "no-store" })).json();
+    const screen = (studio.screens || []).find((s) => s.id === screenId);
+    if (screen) {
+      displayName = screen.name || screenId;
+      if (!designId) designId = screen.designId || null;
+      document.title = `${displayName} — Yello live`;
+    }
+  } catch { /* keep the ids we have */ }
+}
+
+function showBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  const probe = new Image();
+  probe.onload = () => {
+    img.src = url;
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    blobUrl = url;
+  };
+  probe.onerror = () => URL.revokeObjectURL(url);
+  probe.src = url;
+}
+
+async function tick() {
+  if (stopped) return;
+  try {
+    if (screenId) {
+      const res = await fetch(`/api/screens/${encodeURIComponent(screenId)}/frame`, { cache: "no-store" });
+      if (res.ok) {
+        showBlob(await res.blob());
+        setState("live", `${displayName} · live`);
+        return;
+      }
+    }
+    if (designId) {
+      const q = new URLSearchParams({ design: designId });
+      if (pageId) q.set("page", pageId);
+      const res = await fetch(`/api/preview?${q}`, { cache: "no-store" });
+      if (res.ok) {
+        showBlob(await res.blob());
+        setState("preview", screenId ? `${displayName} · offline — design preview` : `${displayName} · design preview`);
+        return;
+      }
+    }
+    setState("down", screenId ? `${displayName} · waiting for the screen…` : "Nothing to show — pass ?screen= or ?design=");
+  } catch {
+    setState("down", `${displayName} · server unreachable, retrying…`);
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  stopped = document.hidden;
+  if (!stopped) tick();
+});
+
+(async () => {
+  await resolveScreen();
+  if (screenId && !designId) setState("", `${displayName} · waiting for the screen…`);
+  await tick();
+  setInterval(tick, intervalMs);
+})();
+</script>
+</body>
+</html>

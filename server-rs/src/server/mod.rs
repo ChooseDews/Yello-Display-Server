@@ -291,6 +291,7 @@ pub struct AppState {
     pub ha_values: Arc<RwLock<HashMap<String, Value>>>,
     pub ha_last_fetch: Arc<RwLock<HashMap<String, Instant>>>,
     pub live_states: Arc<RwLock<HashMap<String, LivePreviewState>>>,
+    pub started: Instant,
     pub studio_path: PathBuf,
     pub secrets_path: PathBuf,
     pub static_dir: PathBuf,
@@ -310,6 +311,7 @@ impl AppState {
             ha_values: Arc::new(RwLock::new(HashMap::new())),
             ha_last_fetch: Arc::new(RwLock::new(HashMap::new())),
             live_states: Arc::new(RwLock::new(HashMap::new())),
+            started: Instant::now(),
             studio_path,
             secrets_path,
             static_dir,
@@ -1555,8 +1557,11 @@ pub async fn handle_http_request(
     let path = req.uri().path().to_string();
 
     let resp = match (method, path.as_str()) {
-        (Method::GET, "/") | (Method::GET, "/designer") | (Method::GET, "/devices") | (Method::GET, "/designs") | (Method::GET, "/settings") | (Method::GET, "/about") | (Method::GET, "/agent") => {
+        (Method::GET, "/") | (Method::GET, "/designer") | (Method::GET, "/devices") | (Method::GET, "/designs") | (Method::GET, "/settings") | (Method::GET, "/server") | (Method::GET, "/about") | (Method::GET, "/agent") => {
             serve_static_file(&state.static_dir.join("index.html"), "text/html", false).await
+        }
+        (Method::GET, "/player") => {
+            serve_static_file(&state.static_dir.join("player.html"), "text/html", false).await
         }
         (Method::GET, p) | (Method::HEAD, p) if p.starts_with("/static/") => {
             let rel = p.trim_start_matches("/static/");
@@ -2187,6 +2192,53 @@ pub async fn handle_http_request(
                 json_response(StatusCode::NOT_FOUND, &json!({"error": "not found"}))
             }
         }
+        (Method::GET, "/api/server-stats") => {
+            let devices = state.devices.read().await;
+            let studio = state.studio.read().await;
+            let mut connections: Vec<Value> = devices
+                .values()
+                .map(|s| {
+                    json!({
+                        "screenId": s.device_id,
+                        "remote": s.remote,
+                        "connectedSeconds": s.connected_at.elapsed().as_secs(),
+                        "connectedSince": s.connected_since,
+                        "wireBytes": s.total_wire_bytes,
+                        "pixels": s.total_pixels,
+                        "zoneMessages": s.total_zone_messages,
+                        "hasFrame": s.last_frame.is_some(),
+                    })
+                })
+                .collect();
+            connections.sort_by(|a, b| a["screenId"].as_str().cmp(&b["screenId"].as_str()));
+            json_response(StatusCode::OK, &json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "uptimeSeconds": state.started.elapsed().as_secs(),
+                "processMemoryBytes": proc_self_rss_bytes(),
+                "systemMemory": proc_meminfo(),
+                "connections": connections,
+                "connectedScreens": devices.len(),
+                "knownScreens": studio.screens.len(),
+                "designsCount": studio.designs.len(),
+                "cachedImages": state.images.read().await.len(),
+                "externalValues": state.external_values.read().await.len(),
+                "homeAssistant": {
+                    "configured": state.ha_client.read().await.configured(),
+                    "entities": state.ha_values.read().await.len(),
+                },
+            }))
+        }
+        (Method::GET, p) if p.starts_with("/api/screens/") && p.ends_with("/frame") => {
+            let screen_id = p.trim_start_matches("/api/screens/").trim_end_matches("/frame");
+            let devices = state.devices.read().await;
+            match devices.get(screen_id).and_then(|s| s.last_frame.clone()) {
+                Some(frame) => png_response(&frame),
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    &json!({"error": "no live frame for this screen (not connected, or nothing pushed yet)"}),
+                ),
+            }
+        }
         (Method::GET, "/api/status") => {
             let devices = state.devices.read().await;
             let studio = state.studio.read().await;
@@ -2204,6 +2256,34 @@ pub async fn handle_http_request(
     };
 
     Ok(resp)
+}
+
+/// This process's resident memory in bytes, from /proc/self/status
+/// (Linux); None where that is unavailable.
+fn proc_self_rss_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// Host memory totals from /proc/meminfo (Linux); nulls where unavailable.
+fn proc_meminfo() -> Value {
+    fn kb_field(text: &str, name: &str) -> Option<u64> {
+        text.lines().find_map(|line| {
+            let rest = line.strip_prefix(name)?;
+            rest.trim().trim_end_matches("kB").trim().parse::<u64>().ok().map(|kb| kb * 1024)
+        })
+    }
+    let text = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    json!({
+        "totalBytes": kb_field(&text, "MemTotal:"),
+        "availableBytes": kb_field(&text, "MemAvailable:"),
+    })
 }
 
 fn query_param(req: &Request<Body>, name: &str) -> Option<String> {

@@ -34,8 +34,9 @@
       <nav class="main-nav" aria-label="Studio navigation">
         <a href="/designer" data-route="designer">Designer</a>
         <a href="/devices" data-route="devices">Devices</a>
-        <a href="/designs" data-route="designs">Screen designs</a>
+        <a href="/designs" data-route="designs">Designs</a>
         <a href="/settings" data-route="settings">Settings</a>
+        <a href="/server" data-route="server">Server</a>
         <a href="/about" data-route="about">About</a>
       </nav>
       <div class="deployment-controls designer-actions">
@@ -203,11 +204,26 @@
       <div id="device-page-summary" class="summary-chip">Loading…</div>
     </div>
     <div id="device-grid" class="device-grid"></div>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-bolt"></use></svg></div>
+        <div><h2>Flash the Yello firmware</h2><p>Flash an ESP32 over USB.</p></div>
+        <span id="flash-state" class="integration-badge">Checking…</span>
+      </div>
+      <div id="flash-region">
+        <p class="form-help">Checking whether this server has a firmware build bundled…</p>
+      </div>
+      <ul class="flash-notes">
+        <li><strong>Chrome or Edge on a computer</strong> — no Web Serial in Safari/iOS.</li>
+        <li>USB data cable, then pick the serial port (CH340/CP210x). If it won't start, hold <strong>BOOT</strong>.</li>
+        <li>A full erase also clears the device's saved Wi-Fi. Same binaries for esptool: the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a>.</li>
+      </ul>
+    </section>
   </main>
 
   <main id="designs-page" class="management-page hidden">
     <div class="page-heading">
-      <div><span class="eyebrow">Library</span><h1>Screen designs</h1><p>See every saved screen at once and deploy each design to one or more devices.</p></div>
+      <div><span class="eyebrow">Library</span><h1>Designs</h1><p>See every saved design at once and deploy each design to one or more devices.</p></div>
       <button id="designs-new" class="primary-button">New design</button>
     </div>
     <div id="design-grid" class="design-grid"></div>
@@ -375,6 +391,36 @@
     <div id="agent-panel-grip" class="agent-panel-grip" title="Drag to resize"></div>
   </aside>
 
+  <main id="server-page" class="management-page hidden">
+    <div class="page-heading">
+      <div><span class="eyebrow">System</span><h1>Server</h1><p>Live stats for this Yello server: process memory, connections and library.</p></div>
+      <div id="server-page-summary" class="summary-chip">Loading…</div>
+    </div>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-logo"></use></svg></div>
+        <div><h2>Process</h2><p>Version, uptime and memory — refreshed every 2 seconds while this page is open.</p></div>
+        <span id="server-version" class="integration-badge">…</span>
+      </div>
+      <div id="server-stat-grid" class="metric-grid"></div>
+    </section>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-monitor"></use></svg></div>
+        <div><h2>Connections</h2><p>Screens connected to this server right now, and what has been pushed to them.</p></div>
+        <span id="server-connections-badge" class="integration-badge">…</span>
+      </div>
+      <div id="server-connections" class="ha-summary-rows"></div>
+    </section>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-home"></use></svg></div>
+        <div><h2>Library &amp; integrations</h2><p>Designs, caches and connected services.</p></div>
+      </div>
+      <div id="server-lib-grid" class="metric-grid"></div>
+    </section>
+  </main>
+
   <main id="about-page" class="management-page hidden">
     <div class="page-heading">
       <div><span class="eyebrow">Yello Studio</span><h1>About</h1><p>Designer and firmware for Yello ESP32 displays.</p></div>
@@ -389,21 +435,6 @@
         <a class="assign-button" href="https://github.com/ChooseDews/Yello-Display-Server/releases" target="_blank" rel="noopener">Releases</a>
         <a class="assign-button" href="https://github.com/ChooseDews/Yello-Display-Server/issues" target="_blank" rel="noopener">Issues</a>
       </div>
-    </section>
-    <section class="settings-card">
-      <div class="settings-card-heading">
-        <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-bolt"></use></svg></div>
-        <div><h2>Flash the Yello firmware</h2><p>Flash an ESP32 over USB.</p></div>
-        <span id="flash-state" class="integration-badge">Checking…</span>
-      </div>
-      <div id="flash-region">
-        <p class="form-help">Checking whether this server has a firmware build bundled…</p>
-      </div>
-      <ul class="flash-notes">
-        <li><strong>Chrome or Edge on a computer</strong> — no Web Serial in Safari/iOS.</li>
-        <li>USB data cable, then pick the serial port (CH340/CP210x). If it won't start, hold <strong>BOOT</strong>.</li>
-        <li>A full erase also clears the device's saved Wi-Fi. Same binaries for esptool: the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a>.</li>
-      </ul>
     </section>
     <section class="settings-card">
       <div class="settings-card-heading">

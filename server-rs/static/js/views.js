@@ -17,7 +17,7 @@ export { initAgentPage };
 
 export function pageFromPath() {
   const name = window.location.pathname.replace(/^\//, "");
-  return ["designer", "devices", "designs", "settings", "about", "agent"].includes(name) ? name : "designer";
+  return ["designer", "devices", "designs", "settings", "server", "about", "agent"].includes(name) ? name : "designer";
 }
 
 export function showPage(page, push = false) {
@@ -26,9 +26,10 @@ export function showPage(page, push = false) {
   if (page === "agent" && tryDockAgent()) return;
   S.currentPage = page;
   document.body.classList.toggle("route-designer", page === "designer");
-  for (const name of ["designer", "devices", "designs", "settings", "about", "agent"]) {
+  for (const name of ["designer", "devices", "designs", "settings", "server", "about", "agent"]) {
     $(`${name}-page`).classList.toggle("hidden", name !== page);
   }
+  if (page !== "server") stopServerStats();
   document.querySelectorAll(".designer-actions").forEach((el) => el.classList.toggle("hidden", page !== "designer"));
   document.querySelectorAll("[data-route]").forEach((link) => {
     link.classList.toggle("active", link.dataset.route === page);
@@ -37,19 +38,13 @@ export function showPage(page, push = false) {
   if (page === "devices") renderDevicePage();
   if (page === "designs") renderDesignPage();
   if (page === "settings") loadHomeAssistantSettings().catch((error) => toast(error.message, true));
+  if (page === "server") renderServerPage();
   if (page === "about") renderAboutPage();
   if (page === "agent") initAgentPage();
   placeAgent();
 }
 
-// The About page: project links plus the ESP32 web flasher. The firmware
-// binaries and manifest.json are bundled into the server image by CI (from
-// the repo's rolling firmware-latest release); when they are absent the
-// flasher card says so instead of offering a dead button. The flashing
-// itself is ESP Web Tools (Web Serial), vendored locally and loaded lazily:
-// the library installs document-level handlers that swallow clicks on the
-// page's other links, so it loads only when the user goes to flash.
-let aboutProbed = false;
+// The About page: project links and a live status blurb.
 export async function renderAboutPage() {
   try {
     const status = await (await fetch("/api/status")).json();
@@ -57,8 +52,20 @@ export async function renderAboutPage() {
       `Visual designer + MCP access for 240 × 320 ESP32 touch displays. ` +
       `This server holds ${status.designsCount} design(s), knows ${status.knownScreens} screen(s), and has ${status.connectedScreens} connected right now.`;
   } catch { /* the static blurb stays */ }
-  if (aboutProbed) return;
-  aboutProbed = true;
+}
+
+// The ESP32 web flasher lives on the Devices page. The firmware binaries
+// and manifest.json are bundled into the server image by CI (from the
+// repo's rolling firmware-latest release); when they are absent the
+// flasher card says so instead of offering a dead button. The flashing
+// itself is ESP Web Tools (Web Serial), vendored locally and loaded
+// lazily: the library installs document-level handlers that swallow
+// clicks on the page's other links, so it loads only when the user goes
+// to flash. Probed once.
+let flashProbed = false;
+async function initFlasher() {
+  if (flashProbed) return;
+  flashProbed = true;
   const region = $("flash-region");
   const badge = $("flash-state");
   let manifest = null;
@@ -120,6 +127,103 @@ export async function renderAboutPage() {
     });
   });
   region.append(start);
+}
+
+// ---------- Server page ----------
+// Live stats from /api/server-stats, polled every 2 s while the page is
+// open; showPage stops the polling when the user navigates away.
+let serverStatsTimer = null;
+
+function stopServerStats() {
+  if (serverStatsTimer) {
+    clearInterval(serverStatsTimer);
+    serverStatsTimer = null;
+  }
+}
+
+function fmtBytes(n) {
+  if (n === null || n === undefined) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
+  return `${(n / 1073741824).toFixed(2)} GB`;
+}
+
+function fmtDuration(totalSeconds) {
+  const s = Math.floor(totalSeconds || 0);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+function statTile(grid, value, label) {
+  const tile = document.createElement("div");
+  tile.className = "metric";
+  const v = document.createElement("strong");
+  v.textContent = value;
+  const l = document.createElement("span");
+  l.textContent = label;
+  tile.append(v, l);
+  grid.append(tile);
+}
+
+export function renderServerPage() {
+  refreshServerStats();
+  if (!serverStatsTimer) serverStatsTimer = setInterval(refreshServerStats, 2000);
+}
+
+async function refreshServerStats() {
+  if (S.currentPage !== "server") {
+    stopServerStats();
+    return;
+  }
+  let stats;
+  try {
+    stats = await (await fetch("/api/server-stats", { cache: "no-store" })).json();
+  } catch {
+    return;
+  }
+  $("server-page-summary").textContent = `v${stats.version} · up ${fmtDuration(stats.uptimeSeconds)}`;
+  $("server-version").textContent = `v${stats.version}`;
+  const grid = $("server-stat-grid");
+  grid.replaceChildren();
+  statTile(grid, fmtBytes(stats.processMemoryBytes), "Process memory (RSS)");
+  statTile(grid, fmtDuration(stats.uptimeSeconds), "Server uptime");
+  statTile(
+    grid,
+    stats.systemMemory?.totalBytes ? `${fmtBytes(stats.systemMemory.availableBytes)} free` : "—",
+    `Host memory (${fmtBytes(stats.systemMemory?.totalBytes)} total)`,
+  );
+  statTile(grid, `${stats.connectedScreens} connected`, `${stats.knownScreens} known screens`);
+  const lib = $("server-lib-grid");
+  lib.replaceChildren();
+  statTile(lib, String(stats.designsCount), "Designs");
+  statTile(lib, String(stats.cachedImages), "Cached images");
+  statTile(lib, String(stats.externalValues), "External data values");
+  statTile(lib, stats.homeAssistant?.configured ? `${stats.homeAssistant.entities} entities` : "Not connected", "Home Assistant");
+  $("server-connections-badge").textContent = `${stats.connectedScreens} connected`;
+  const rows = $("server-connections");
+  rows.replaceChildren();
+  if (!stats.connections?.length) {
+    const empty = document.createElement("p");
+    empty.className = "form-help";
+    empty.textContent = "No screens are connected right now.";
+    rows.append(empty);
+  }
+  for (const conn of stats.connections || []) {
+    const row = document.createElement("div");
+    row.className = "ha-summary-row";
+    const label = document.createElement("span");
+    label.textContent = conn.screenId;
+    const detail = document.createElement("strong");
+    detail.textContent = `${conn.remote} · up ${fmtDuration(conn.connectedSeconds)} · ${fmtBytes(conn.wireBytes)} pushed · ${compactNumber(conn.pixels)} px · ${compactNumber(conn.zoneMessages)} zones`;
+    row.append(label, detail);
+    rows.append(row);
+  }
 }
 
 export function renderStudioControls() {
@@ -242,6 +346,7 @@ export function selectScreen(screenId) {
 }
 
 export function renderDevicePage() {
+  initFlasher().catch(() => {});
   const grid = $("device-grid");
   grid.replaceChildren();
   const online = S.studio.screens.filter((screen) => screen.connected).length;
@@ -323,6 +428,26 @@ export function renderDevicePage() {
     save.className = "secondary-button";
     save.textContent = "Save device";
     actions.append(save);
+    const player = document.createElement("a");
+    player.className = "secondary-button";
+    player.textContent = "Open player";
+    player.href = `/player?screen=${encodeURIComponent(screen.id)}`;
+    player.target = "_blank";
+    player.rel = "noopener";
+    const embed = document.createElement("button");
+    embed.type = "button";
+    embed.className = "secondary-button";
+    embed.textContent = "Copy embed";
+    embed.onclick = async () => {
+      const snippet = `<iframe src="${window.location.origin}/player?screen=${encodeURIComponent(screen.id)}" width="480" height="640" style="border:0;border-radius:12px" title="${screen.name} — Yello live view"></iframe>`;
+      try {
+        await navigator.clipboard.writeText(snippet);
+        toast("Embed code copied — paste it anywhere an iframe fits");
+      } catch {
+        toast("Clipboard is unavailable in this browser", true);
+      }
+    };
+    actions.append(player, embed);
     if (screen.connected) {
       const restart = document.createElement("button");
       restart.type = "button";
