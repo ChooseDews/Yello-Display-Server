@@ -555,16 +555,19 @@ esp-web-install-button { display: inline-block; }
 .ha-summary-row code { font-size: 13.5px; }
 
 /* Agent page */
-/* Provider bar: one compact row once connected; the full key form hides
-   behind the gear until opened (or while no working key is saved). */
-.agent-provider-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.agent-provider-id { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
-.agent-provider-status { color: var(--muted); font-size: 12px; white-space: nowrap; }
+/* Provider bar: one compact row at the very top of the agent cards; the
+   full key form hides behind the gear until opened (or while no working
+   key is saved). */
+#agent-setup-card { padding: 8px 12px; }
+.agent-provider-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
+.agent-provider-id { display: inline-flex; align-items: center; gap: 7px; min-width: 0; font-size: 12.5px; }
+.agent-provider-status { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
 .agent-provider-status.connected { color: #72d895; }
+#agent-setup-card .icon-button { width: 26px; height: 26px; }
 #agent-setup-card .icon-button[aria-expanded="true"] { border-color: var(--accent-deep); color: var(--accent); }
-#agent-setup-body { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
-.agent-provider-note { margin: 0; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.agent-setup { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding-top: 12px; }
+#agent-setup-body { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+.agent-provider-note { margin: 0; color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.agent-setup { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; gap: 6px 8px; align-items: center; padding-top: 8px; }
 .agent-setup > label { color: #b1b9c7; font-size: 11px; }
 .agent-setup input, .agent-setup select { min-width: 0; }
 .agent-model-native { display: none !important; }
@@ -579,7 +582,7 @@ esp-web-install-button { display: inline-block; }
 .agent-messages .msg.assistant { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
 .agent-messages .msg pre { background: #0d0f14; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; overflow-x: auto; font-size: 11px; }
 .agent-messages .msg code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
-.agent-messages .tool-chip { align-self: flex-start; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; background: var(--panel); }
+.agent-messages .tool-chip { align-self: flex-start; font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; background: var(--panel); }
 /* Natural composer: one rounded box, borderless growing input, a round
    send button sitting inside it. */
 .agent-composer { border: 1px solid var(--line-strong); border-radius: 16px; background: #11141b; padding: 8px 8px 6px 12px; display: flex; flex-direction: column; gap: 2px; transition: border-color .15s ease; }
@@ -630,12 +633,26 @@ esp-web-install-button { display: inline-block; }
 .agent-dev-button[aria-pressed="true"] { background: var(--accent); border-color: #c99f20; color: #191507; }
 .msg-row { align-self: flex-start; max-width: 92%; display: flex; flex-direction: column; gap: 6px; }
 .msg-row .msg { max-width: 100%; align-self: flex-start; }
-.tool-entry { align-self: flex-start; max-width: 88%; display: flex; flex-direction: column; gap: 4px; }
-.tool-json { display: none; margin: 0; background: #0d0f14; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-size: 10px; line-height: 1.45; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-entry { align-self: stretch; width: 100%; display: flex; flex-direction: column; gap: 3px; }
+.tool-json-wrap { display: flex; flex-direction: column; gap: 2px; }
+.tool-json-meta { display: none; font-size: 9.5px; color: var(--muted); }
+.tool-json-meta:empty { display: none !important; }
+.agent-chat-card.agent-dev .tool-json-meta { display: block; }
+.tool-json { display: none; margin: 0; background: #0d0f14; border: 1px solid var(--line); border-radius: 8px; padding: 5px 7px; font-size: 10px; line-height: 1.35; max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .thinking { display: none; border: 1px dashed var(--line-strong); border-radius: 10px; padding: 6px 10px; }
 .thinking summary { cursor: pointer; font-size: 11px; color: var(--muted); }
 .thinking-body { white-space: pre-wrap; font-size: 11px; line-height: 1.5; color: var(--muted); max-height: 220px; overflow-y: auto; margin-top: 6px; }
 .agent-chat-card.agent-dev .tool-json, .agent-chat-card.agent-dev .thinking { display: block; }
+/* Tool call outcome colors: green on success, red on failure. */
+.tool-ok .tool-chip { color: #4ade80; border-color: rgba(74, 222, 128, .45); background: rgba(74, 222, 128, .08); }
+.tool-fail .tool-chip { color: #f87171; border-color: rgba(248, 113, 113, .5); background: rgba(248, 113, 113, .08); }
+.tool-fail .tool-json { border-color: rgba(248, 113, 113, .35); }
+/* While the agent runs a tool call, the designer window breathes green. */
+.tool-pulse { animation: tool-breathe 1.5s ease-in-out infinite; }
+@keyframes tool-breathe {
+  0%, 100% { box-shadow: inset 0 0 0 2px rgba(74, 222, 128, .22), inset 0 0 18px rgba(74, 222, 128, .05); }
+  50% { box-shadow: inset 0 0 0 3px rgba(74, 222, 128, .65), inset 0 0 34px rgba(74, 222, 128, .14); }
+}
 .system-prompt { margin-bottom: 10px; }
 .system-prompt .thinking-body { max-height: 300px; }
 .agent-panel { display: none; }
@@ -645,8 +662,14 @@ esp-web-install-button { display: inline-block; }
   body.agent-dock { padding-right: 372px; }
   .agent-panel { display: flex; flex-direction: column; position: fixed; top: 0; right: 0; bottom: 0; width: 372px; z-index: 35; background: var(--bg); border-left: 1px solid var(--line-strong); transform: translateX(103%); transition: transform .22s ease; }
   body.agent-dock .agent-panel { transform: none; box-shadow: -18px 0 40px rgba(0, 0, 0, .35); }
+  body.agent-float .agent-panel { transform: none; border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 24px 70px rgba(0, 0, 0, .55); overflow: hidden; }
   .agent-panel-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); font-weight: 700; }
-  .agent-panel-head .icon-button { margin-left: auto; }
+  body.agent-float .agent-panel-head { cursor: move; }
+  #agent-panel-float { margin-left: auto; }
+  .agent-panel-resize { display: none; }
+  body.agent-dock .agent-panel-resize { display: block; position: absolute; left: 0; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 5; }
+  .agent-panel-grip { display: none; }
+  body.agent-float .agent-panel-grip { display: block; position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 5; }
   .agent-mount-panel { flex: 1; min-height: 0; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
   .agent-mount-panel .settings-card { margin: 0; }
   .agent-mount-panel .agent-setup { grid-template-columns: 1fr; }

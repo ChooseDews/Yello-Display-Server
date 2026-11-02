@@ -26,6 +26,48 @@ let initialized = false;
 let sending = false;
 let aborter = null;
 let dockOpen = false;
+let panelMode = localStorage.getItem("yello-agent-panel-mode") === "float" ? "float" : "dock";
+
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+
+function floatGeometry() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("yello-agent-panel-float") || "null");
+    if (saved && saved.w && saved.h) {
+      return {
+        w: clampNumber(saved.w, 320, window.innerWidth - 16),
+        h: clampNumber(saved.h, 360, window.innerHeight - 16),
+        x: clampNumber(saved.x, 0, window.innerWidth - 120),
+        y: clampNumber(saved.y, 0, window.innerHeight - 80),
+      };
+    }
+  } catch { /* fall through to the default */ }
+  const w = Math.min(480, window.innerWidth - 32);
+  const h = Math.min(720, window.innerHeight - 100);
+  return { x: window.innerWidth - w - 24, y: 84, w, h };
+}
+
+function applyPanelGeometry(inPanel) {
+  const panel = $("agent-panel");
+  if (!panel) return;
+  if (!inPanel) {
+    panel.removeAttribute("style");
+    return;
+  }
+  if (panelMode === "dock") {
+    const width = clampNumber(Number(localStorage.getItem("yello-agent-dock-width")) || 372, 300, 760);
+    panel.style.cssText = `width: ${width}px;`;
+  } else {
+    const g = floatGeometry();
+    panel.style.cssText = `left: ${g.x}px; top: ${g.y}px; width: ${g.w}px; height: ${g.h}px; right: auto; bottom: auto;`;
+  }
+  const floatButton = $("agent-panel-float");
+  if (floatButton) {
+    floatButton.querySelector("use")?.setAttribute("href", panelMode === "float" ? "#i-screen-embed" : "#i-external");
+    floatButton.setAttribute("aria-label", panelMode === "float" ? "Dock the agent panel" : "Undock the agent panel");
+    floatButton.title = panelMode === "float" ? "Dock" : "Undock";
+  }
+}
 const usageTotals = { in: 0, out: 0, cost: 0 };
 const conversation = []; // OpenAI-format messages (system prompt added per request)
 
@@ -36,7 +78,9 @@ const isWide = () => window.matchMedia("(min-width: 1200px)").matches;
 // narrow screens the cards live on the Agent page instead.
 export function placeAgent() {
   const docked = isWide() && dockOpen;
-  document.body.classList.toggle("agent-dock", docked);
+  document.body.classList.toggle("agent-dock", docked && panelMode === "dock");
+  document.body.classList.toggle("agent-float", docked && panelMode === "float");
+  applyPanelGeometry(docked);
   const mount = $(docked ? "agent-mount-panel" : "agent-mount-page");
   for (const id of ["agent-setup-card", "agent-chat-card"]) {
     const card = $(id);
@@ -370,7 +414,21 @@ const TOOL_IMPL = {
   assign_design: toolAssignDesign,
 };
 
+/** While any tool call runs, the designer window breathes a green border. */
+function setToolPulse(on) {
+  document.querySelectorAll(".canvas-area").forEach((el) => el.classList.toggle("tool-pulse", on));
+}
+
 async function runTool(name, argsJson) {
+  setToolPulse(true);
+  try {
+    return await runToolCall(name, argsJson);
+  } finally {
+    setToolPulse(false);
+  }
+}
+
+async function runToolCall(name, argsJson) {
   const impl = TOOL_IMPL[name];
   if (!impl) return { error: `Unknown tool ${name}` };
   let args = {};
@@ -417,6 +475,59 @@ function addMessage(role, text = "") {
   return el;
 }
 
+/** Expand string values that are themselves JSON (e.g. a whole design
+ *  document carried in a `json` field) so the dev view shows one clean
+ *  document instead of an escaped string blob. */
+function expandJsonStrings(value, expansions = 0) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (expansions < 4 && ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]")))) {
+      try {
+        return expandJsonStrings(JSON.parse(trimmed), expansions + 1);
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item) => expandJsonStrings(item, expansions));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expandJsonStrings(item, expansions)]));
+  }
+  return value;
+}
+
+function jsonBlockText(value) {
+  let text;
+  try {
+    text = JSON.stringify(expandJsonStrings(value), null, 2) || "";
+  } catch {
+    text = String(value ?? "");
+  }
+  return text.length > 40000 ? `${text.slice(0, 40000)}\n… (truncated)` : text;
+}
+
+/** A dev-mode JSON block with a token estimate (chars / 4) when long. */
+function makeJsonBlock() {
+  const wrap = document.createElement("div");
+  wrap.className = "tool-json-wrap";
+  const meta = document.createElement("div");
+  meta.className = "tool-json-meta";
+  const pre = document.createElement("pre");
+  pre.className = "tool-json";
+  wrap.append(meta, pre);
+  return {
+    wrap,
+    set(value) {
+      const text = jsonBlockText(value);
+      pre.textContent = text;
+      meta.textContent = text.length > 1000
+        ? `≈ ${Math.round(text.length / 4).toLocaleString("en-US")} tokens · ${text.length.toLocaleString("en-US")} chars`
+        : "";
+    },
+  };
+}
+
 // One tool call in the transcript: a one-line chip normally; in dev mode
 // the arguments and result JSON show underneath it.
 function addToolEntry(name, argsJson) {
@@ -426,23 +537,21 @@ function addToolEntry(name, argsJson) {
   const chip = document.createElement("div");
   chip.className = "tool-chip";
   chip.textContent = `… ${name}`;
-  const args = document.createElement("pre");
-  args.className = "tool-json";
-  let prettyArgs = argsJson || "{}";
+  const args = makeJsonBlock();
+  let parsedArgs = argsJson || "{}";
   try {
-    prettyArgs = JSON.stringify(JSON.parse(argsJson || "{}"), null, 2);
+    parsedArgs = JSON.parse(argsJson || "{}");
   } catch { /* keep raw */ }
-  args.textContent = prettyArgs.length > 4000 ? `${prettyArgs.slice(0, 4000)}…` : prettyArgs;
-  const result = document.createElement("pre");
-  result.className = "tool-json";
-  wrap.append(chip, args, result);
+  args.set(parsedArgs);
+  const result = makeJsonBlock();
+  wrap.append(chip, args.wrap, result.wrap);
   box.append(wrap);
   box.scrollTop = box.scrollHeight;
   return {
     finish(resultObj, ok, imageUrl) {
       chip.textContent = `${ok ? "✓" : "✕"} ${name}`;
-      const pretty = JSON.stringify(resultObj, null, 2) || "";
-      result.textContent = pretty.length > 4000 ? `${pretty.slice(0, 4000)}…` : pretty;
+      wrap.classList.add(ok ? "tool-ok" : "tool-fail");
+      result.set(resultObj);
       if (imageUrl) {
         const img = document.createElement("img");
         img.className = "tool-thumb";
@@ -1203,6 +1312,57 @@ export function initAgentPage() {
   };
   applyDev();
   $("agent-panel-close").onclick = () => setDock(false);
+  $("agent-panel-float").onclick = () => {
+    panelMode = panelMode === "float" ? "dock" : "float";
+    localStorage.setItem("yello-agent-panel-mode", panelMode);
+    placeAgent();
+  };
+  // Pointer-drag helper: drag(event target) with move/up on the window.
+  const startDrag = (event, onMove, onDone) => {
+    event.preventDefault();
+    const move = (ev) => onMove(ev);
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (onDone) onDone();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  // Docked: drag the panel's left edge to widen/narrow the column.
+  $("agent-panel-resize").addEventListener("pointerdown", (event) => {
+    if (panelMode !== "dock" || !dockOpen) return;
+    const startX = event.clientX;
+    const startWidth = $("agent-panel").getBoundingClientRect().width;
+    startDrag(event, (ev) => {
+      const width = clampNumber(startWidth + (startX - ev.clientX), 300, 760);
+      localStorage.setItem("yello-agent-dock-width", String(Math.round(width)));
+      applyPanelGeometry(true);
+    });
+  });
+  // Floating: drag the header to move, the corner grip to resize.
+  $("agent-panel").querySelector(".agent-panel-head").addEventListener("pointerdown", (event) => {
+    if (panelMode !== "float" || !dockOpen || event.target.closest("button")) return;
+    const start = floatGeometry();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    startDrag(event, (ev) => {
+      const next = { ...start, x: start.x + (ev.clientX - startX), y: start.y + (ev.clientY - startY) };
+      localStorage.setItem("yello-agent-panel-float", JSON.stringify(next));
+      applyPanelGeometry(true);
+    });
+  });
+  $("agent-panel-grip").addEventListener("pointerdown", (event) => {
+    if (panelMode !== "float" || !dockOpen) return;
+    const start = floatGeometry();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    startDrag(event, (ev) => {
+      const next = { ...start, w: start.w + (ev.clientX - startX), h: start.h + (ev.clientY - startY) };
+      localStorage.setItem("yello-agent-panel-float", JSON.stringify(next));
+      applyPanelGeometry(true);
+    });
+  });
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
