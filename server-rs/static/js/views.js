@@ -38,7 +38,9 @@ export function showPage(page, push = false) {
 // binaries and manifest.json are bundled into the server image by CI (from
 // the repo's rolling firmware-latest release); when they are absent the
 // flasher card says so instead of offering a dead button. The flashing
-// itself is ESP Web Tools (Web Serial), loaded from its CDN on first use.
+// itself is ESP Web Tools (Web Serial), vendored locally and loaded lazily:
+// the library installs document-level handlers that swallow clicks on the
+// page's other links, so it loads only when the user goes to flash.
 let aboutProbed = false;
 export async function renderAboutPage() {
   try {
@@ -66,36 +68,50 @@ export async function renderAboutPage() {
     return;
   }
   badge.textContent = "Firmware ready";
-  const script = document.createElement("script");
-  script.type = "module";
-  script.src = "/static/vendor/esp-web-tools/dist/web/install-button.js";
-  script.addEventListener("error", () => {
-    badge.textContent = "Flasher unavailable";
-    region.replaceChildren();
-    const note = document.createElement("p");
-    note.className = "form-help";
-    note.textContent = "The ESP Web Tools script could not be loaded from this server. You can still flash the same binaries from the firmware-latest release with esptool.";
-    region.append(note);
-  });
-  document.head.append(script);
   region.replaceChildren();
-  const install = document.createElement("esp-web-install-button");
-  install.setAttribute("manifest", "/static/firmware/manifest.json");
-  const activate = document.createElement("button");
-  activate.slot = "activate";
-  activate.className = "primary-button";
-  activate.type = "button";
-  activate.textContent = "Connect & install firmware";
-  const unsupported = document.createElement("span");
-  unsupported.slot = "unsupported";
-  unsupported.className = "form-help";
-  unsupported.textContent = "This browser cannot flash over USB: Web Serial needs Chrome or Edge on a computer.";
-  const notAllowed = document.createElement("span");
-  notAllowed.slot = "not-allowed";
-  notAllowed.className = "form-help";
-  notAllowed.textContent = "Browser flashing needs a secure context (HTTPS or localhost).";
-  install.append(activate, unsupported, notAllowed);
-  region.append(install);
+  const start = document.createElement("button");
+  start.type = "button";
+  start.className = "primary-button";
+  start.textContent = "Connect & install firmware";
+  // Never disabled: when Web Serial is unavailable (Safari, or an insecure
+  // origin) the loaded install button explains that itself via its slots.
+  start.addEventListener("click", () => {
+    start.disabled = true;
+    start.textContent = "Loading the flasher\u2026";
+    const script = document.createElement("script");
+    script.type = "module";
+    script.src = "/static/vendor/esp-web-tools/dist/web/install-button.js";
+    script.addEventListener("error", () => {
+      badge.textContent = "Flasher unavailable";
+      region.replaceChildren();
+      const note = document.createElement("p");
+      note.className = "form-help";
+      note.textContent = "The ESP Web Tools script could not be loaded from this server. You can still flash the same binaries from the firmware-latest release with esptool.";
+      region.append(note);
+    });
+    document.head.append(script);
+    customElements.whenDefined("esp-web-install-button").then(() => {
+      const install = document.createElement("esp-web-install-button");
+      install.setAttribute("manifest", "/static/firmware/manifest.json");
+      const activate = document.createElement("button");
+      activate.slot = "activate";
+      activate.className = "primary-button";
+      activate.type = "button";
+      activate.textContent = "Connect & install firmware";
+      const unsupported = document.createElement("span");
+      unsupported.slot = "unsupported";
+      unsupported.className = "form-help";
+      unsupported.textContent = "This browser cannot flash over USB: Web Serial needs Chrome or Edge on a computer.";
+      const notAllowed = document.createElement("span");
+      notAllowed.slot = "not-allowed";
+      notAllowed.className = "form-help";
+      notAllowed.textContent = "Browser flashing needs a secure context (HTTPS or localhost).";
+      install.append(activate, unsupported, notAllowed);
+      region.replaceChildren(install);
+      activate.click();
+    });
+  });
+  region.append(start);
 }
 
 export function renderStudioControls() {
@@ -498,7 +514,18 @@ export async function loadHomeAssistantSettings() {
   badge.className = `integration-badge${S.homeAssistantSettings.configured ? " connected" : ""}`;
   badge.textContent = !S.homeAssistantSettings.configured
     ? "Not configured"
-    : method === "oauth" ? "Connected · OAuth" : "Configured";
+    : method === "oauth" ? "Connected · OAuth" : "Connected · Token";
+  // Connected: collapse the entry form to a summary (URL, method, status)
+  // with just a Disconnect action; the form returns on disconnect.
+  const connected = Boolean(S.homeAssistantSettings.configured);
+  $("ha-settings-form").classList.toggle("hidden", connected);
+  document.querySelector(".oauth-block").classList.toggle("hidden", connected);
+  $("ha-summary").classList.toggle("hidden", !connected);
+  if (connected) {
+    $("ha-summary-url").textContent = S.homeAssistantSettings.url || "";
+    $("ha-summary-method").textContent = method === "oauth" ? "OAuth sign-in" : "Long-lived token";
+    $("ha-summary-status").textContent = "Connected";
+  }
   $("ha-settings-result").textContent = S.homeAssistantSettings.tokenConfigured
     ? "A private token is stored."
     : method === "oauth" ? "Signed in with Home Assistant (OAuth) — no token is stored." : "";

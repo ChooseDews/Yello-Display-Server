@@ -225,6 +225,7 @@ function bindEvents() {
     event.preventDefault();
     saveHomeAssistantSettings(false);
   };
+  $("ha-summary-clear").onclick = () => $("ha-clear").click();
   $("ha-clear").onclick = async () => {
     const confirmed = await appConfirm({
       title: "Disconnect Home Assistant?",
