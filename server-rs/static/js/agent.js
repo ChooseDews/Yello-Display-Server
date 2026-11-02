@@ -687,12 +687,14 @@ function addAssistantTurn() {
     thinkingBody,
     row,
     setThinking(text) {
-      if (!text) return;
+      if (!text || !text.trim()) return;
       if (!thinking.isConnected) row.insertBefore(thinking, bubble.isConnected ? bubble : null);
       thinkingBody.textContent = text;
     },
     setContent(text) {
-      if (text) {
+      // Whitespace-only text (or text that renders to nothing but <br>)
+      // must never surface as an empty bubble.
+      if (text && text.trim()) {
         if (!bubble.isConnected) row.append(bubble);
         bubble.innerHTML = markdownLite(text);
       } else {
@@ -1390,7 +1392,7 @@ async function sendAgentMessage() {
         usageTotals.cost += usage.cost || 0;
         renderUsage();
       }
-      const assistantMessage = { role: "assistant", content: content || null };
+      const assistantMessage = { role: "assistant", content: content && content.trim() ? content : null };
       if (reasoning) assistantMessage._reasoning = reasoning;
       if (toolCalls.length) {
         assistantMessage.tool_calls = toolCalls.map((call) => ({
