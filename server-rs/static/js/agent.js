@@ -341,8 +341,14 @@ const TOOLS = [
     type: "function",
     function: {
       name: "list_home_assistant_sensors",
-      description: "List the user's Home Assistant entities (sensors and other devices) with their current live states, names and units. Only available while Home Assistant is connected.",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
+      description: "List the user's Home Assistant entities (sensors and other devices) with their current live states, names and units. Only available while Home Assistant is connected. Pass pattern to grep the list instead of returning everything.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Optional regex (grep-style, case-insensitive) matched against each entity's id and name — e.g. '^sensor\\.' or 'temperature|humidity'. Omit to list everything." },
+        },
+        additionalProperties: false,
+      },
     },
   },
   {
@@ -579,17 +585,31 @@ function availableTools() {
   return TOOLS.filter((tool) => tool.function.name !== "list_home_assistant_sensors" || haEnabled());
 }
 
-async function toolListHomeAssistantSensors() {
+async function toolListHomeAssistantSensors(args) {
   if (!haEnabled()) {
     return { enabled: false, sensors: [], note: "Home Assistant is not connected in this Studio, so no sensors are available." };
   }
-  const sensors = (S.homeAssistant.entities || []).map((e) => ({
+  let regex = null;
+  if (args.pattern) {
+    try {
+      regex = new RegExp(args.pattern, "i");
+    } catch (error) {
+      return { error: `Invalid regex "${args.pattern}": ${error.message}` };
+    }
+  }
+  const all = (S.homeAssistant.entities || []).map((e) => ({
     entityId: e.entityId,
     name: e.name,
     state: e.state,
     ...(e.unit ? { unit: e.unit } : {}),
   }));
-  return { enabled: true, count: sensors.length, sensors };
+  const sensors = regex ? all.filter((e) => regex.test(e.entityId) || regex.test(e.name || "")) : all;
+  return {
+    enabled: true,
+    count: sensors.length,
+    ...(regex ? { pattern: args.pattern, totalCount: all.length } : {}),
+    sensors,
+  };
 }
 
 async function toolOpenDesign(args) {
