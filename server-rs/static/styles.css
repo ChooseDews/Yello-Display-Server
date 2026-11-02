@@ -25,6 +25,13 @@ button { color: inherit; }
   height: var(--header-height); display: flex; align-items: center; justify-content: space-between;
   padding: 0 18px; border-bottom: 1px solid var(--line); background: #11141a;
 }
+/* On wide screens the two header bars dissolve into the single header row;
+   at phone widths they become the top bar and the scrollable sub-bar. */
+.top-bar, .sub-bar { display: contents; }
+.brand { order: 1; }
+.main-nav { order: 2; }
+.deployment-controls { order: 3; }
+.header-actions { order: 4; }
 .brand { display: flex; align-items: center; gap: 11px; color: inherit; text-decoration: none; }
 .brand-mark {
   display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px;
@@ -387,17 +394,30 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 }
 
 @media (max-width: 860px) {
-  .app-header { height: auto; flex-wrap: wrap; padding: 8px 10px; row-gap: 6px; }
-  .main-nav { order: 3; width: 100%; margin: 0; align-self: auto; overflow-x: auto; gap: 4px; }
+  /* Mobile chrome is exactly three bars: top bar, sub-bar, bottom nav. */
+  .app-header { height: auto; flex-direction: column; align-items: stretch; padding: 0; gap: 0; }
+  .top-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; }
+  .brand { gap: 8px; }
+  .brand-mark { width: 28px; height: 28px; border-radius: 7px; font-size: 15px; }
+  .brand strong { font-size: 13px; }
+  .brand div span:last-child { display: none; }
+  .header-actions { margin-left: auto; gap: 6px; flex-wrap: nowrap; }
+  .sub-bar {
+    display: flex; align-items: center; gap: 12px; padding: 6px 12px;
+    border-top: 1px solid var(--line); overflow-x: auto; scrollbar-width: none;
+  }
+  .sub-bar::-webkit-scrollbar { display: none; }
+  .main-nav { flex: 0 0 auto; margin: 0; align-self: auto; gap: 4px; }
   .main-nav a { font-size: 12px; padding: 7px 11px; white-space: nowrap; border-bottom: 0; border-radius: 999px; background: var(--panel-2); }
   .main-nav a::first-letter { font-size: 12px; }
   .main-nav a.active { background: var(--accent); color: #191507; font-weight: 700; }
-  .header-actions { margin-left: auto; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .deployment-controls { flex: 0 0 auto; align-items: center; padding-right: 0; gap: 6px; }
   .deployment-controls label { display: grid; font-size: 0; gap: 0; }
-  .deployment-controls select { width: 96px; min-height: 34px; }
-  .deployment-controls .icon-button { width: 34px; height: 34px; }
+  .deployment-controls select { width: 118px; min-height: 36px; font-size: 12px; }
+  .deployment-controls .icon-button { width: 36px; height: 36px; }
+  .deployment-controls .assign-button { display: inline-flex; align-items: center; height: 36px; }
   .icon-button { width: 36px; height: 36px; }
-  .primary-button { height: 38px; }
+  .primary-button { height: 38px; padding: 0 12px; }
 
   .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
   .workspace .left-panel, .workspace .right-panel { display: none; border: 0; padding-bottom: 84px; }
@@ -420,7 +440,9 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
   .mobile-tabs button.active { background: var(--accent); border-color: #c99f20; color: #191507; font-weight: 700; }
 
   .canvas-area { grid-template-rows: auto auto minmax(0, 1fr) auto; }
-  .canvas-toolbar { flex-wrap: wrap; height: auto; padding: 6px 8px; gap: 6px; }
+  .canvas-toolbar { flex-wrap: nowrap; height: auto; padding: 6px 8px; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .canvas-toolbar::-webkit-scrollbar { display: none; }
+  .canvas-toolbar > * { flex: 0 0 auto; }
   .screen-size span { display: none; }
   .view-toggle button { min-width: 0; height: 31px; padding: 0 11px; font-size: 11px; }
   .connections-toggle { height: 31px; }

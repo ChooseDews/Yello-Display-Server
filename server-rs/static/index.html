@@ -8,33 +8,37 @@
 </head>
 <body>
   <header class="app-header">
-    <a class="brand" href="/designer" data-route="designer">
-      <span class="brand-mark">Y</span>
-      <div>
-        <strong>Yello Studio</strong>
-        <span id="document-state">Loading screen…</span>
+    <div class="top-bar">
+      <a class="brand" href="/designer" data-route="designer">
+        <span class="brand-mark">Y</span>
+        <div>
+          <strong>Yello Studio</strong>
+          <span id="document-state">Loading screen…</span>
+        </div>
+      </a>
+      <div class="header-actions designer-actions">
+        <div class="device-pill" title="Physical display connection">
+          <span id="device-dot" class="status-dot"></span>
+          <span id="device-status">Checking device</span>
+        </div>
+        <button id="undo" class="icon-button" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+        <button id="redo" class="icon-button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
+        <button id="save" class="primary-button">Save &amp; apply</button>
       </div>
-    </a>
-    <nav class="main-nav" aria-label="Studio navigation">
-      <a href="/designer" data-route="designer">Designer</a>
-      <a href="/devices" data-route="devices">Devices</a>
-      <a href="/designs" data-route="designs">Screen designs</a>
-      <a href="/settings" data-route="settings">Settings</a>
-    </nav>
-    <div id="designer-actions" class="header-actions">
-      <div class="deployment-controls">
+    </div>
+    <div class="sub-bar">
+      <nav class="main-nav" aria-label="Studio navigation">
+        <a href="/designer" data-route="designer">Designer</a>
+        <a href="/devices" data-route="devices">Devices</a>
+        <a href="/designs" data-route="designs">Screen designs</a>
+        <a href="/settings" data-route="settings">Settings</a>
+      </nav>
+      <div class="deployment-controls designer-actions">
         <label>Screen<select id="screen-select" aria-label="Physical screen"></select></label>
         <label>Design<select id="design-select" aria-label="Screen design"></select></label>
         <button id="new-design" class="icon-button" title="Create design" aria-label="Create design">＋</button>
         <button id="assign-design" class="assign-button" title="Assign selected design to selected screen">Assign</button>
       </div>
-      <div class="device-pill" title="Physical display connection">
-        <span id="device-dot" class="status-dot"></span>
-        <span id="device-status">Checking device</span>
-      </div>
-      <button id="undo" class="icon-button" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
-      <button id="redo" class="icon-button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
-      <button id="save" class="primary-button">Save &amp; apply</button>
     </div>
   </header>
 
@@ -223,6 +227,13 @@
         <p>Endpoint: <code id="mcp-endpoint">/mcp</code> (POST, Streamable HTTP / JSON-RPC). Tools: <code>yello_list_designs</code>, <code>yello_get_design</code>, <code>yello_save_design</code>, <code>yello_validate_design</code>, <code>yello_preview_design</code>, <code>yello_list_screens</code>, <code>yello_assign_design</code>, <code>yello_status</code>. Saves are validated like Studio saves and pushed to assigned screens. Like the rest of the Studio API it has no login — keep it on your LAN or tailnet.</p>
         <p class="form-help">Client config:</p>
         <pre id="mcp-config" class="mcp-config"></pre>
+        <p class="form-help">Fastest setup: copy this prompt into your AI assistant and it will connect itself and learn the tools:</p>
+        <pre id="mcp-prompt" class="mcp-config"></pre>
+        <div class="settings-actions">
+          <button type="button" class="assign-button" data-copy-target="mcp-prompt">Copy prompt</button>
+          <button type="button" class="assign-button" data-copy-target="mcp-config">Copy config</button>
+          <button type="button" class="assign-button" data-copy-target="mcp-endpoint">Copy endpoint</button>
+        </div>
       </div>
     </section>
   </main>

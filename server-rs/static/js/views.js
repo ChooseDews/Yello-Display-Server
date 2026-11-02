@@ -23,7 +23,7 @@ export function showPage(page, push = false) {
   for (const name of ["designer", "devices", "designs", "settings"]) {
     $(`${name}-page`).classList.toggle("hidden", name !== page);
   }
-  $("designer-actions").classList.toggle("hidden", page !== "designer");
+  document.querySelectorAll(".designer-actions").forEach((el) => el.classList.toggle("hidden", page !== "designer"));
   document.querySelectorAll("[data-route]").forEach((link) => {
     link.classList.toggle("active", link.dataset.route === page);
   });

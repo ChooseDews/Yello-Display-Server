@@ -66,6 +66,25 @@ export function setMobilePanel(name) {
 }
 
 function bindEvents() {
+  document.querySelectorAll("[data-copy-target]").forEach((button) => {
+    button.onclick = async () => {
+      const target = $(button.dataset.copyTarget);
+      if (!target) return;
+      const text = target.textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand("copy");
+        selection.removeAllRanges();
+      }
+      toast("Copied to clipboard");
+    };
+  });
   document.querySelectorAll("[data-route]").forEach((link) => {
     link.onclick = (event) => {
       event.preventDefault();
@@ -222,6 +241,19 @@ async function initialize() {
     if ($("mcp-config")) {
       $("mcp-config").textContent = JSON.stringify(
         { mcpServers: { yello: { url: mcpUrl } } }, null, 2);
+    }
+    if ($("mcp-prompt")) {
+      $("mcp-prompt").textContent =
+`Connect to my Yello Studio display server so you can manage my screen designs.
+
+Add this MCP server (Streamable HTTP, no authentication — it runs on my private network):
+{"mcpServers": {"yello": {"url": "${mcpUrl}"}}}
+
+Once connected you have these tools: yello_status, yello_list_designs, yello_get_design, yello_save_design, yello_validate_design, yello_preview_design (renders a design page to a PNG image so you can see it), yello_list_screens, yello_assign_design.
+
+Designs are schema v2 documents: {schemaVersion: 2, name, profile, orientation, background, homePageId, pages: [{id, name, background, elements}], sharedElements, dataSources, actions}. Each element is {id, type, frame: {x, y, w, h}, style, props}. Supported types: text, clock, button, image, container, divider, toggle, slider, nav, screen (embeds another design's page inside the frame), gauge, qr, shape.
+
+Workflow: first list my designs and screens so you know what exists. Before saving any change, run yello_validate_design, then yello_preview_design and look at the rendered image to check the layout. Save with yello_save_design — saves are pushed to the screens using that design.`;
     }
     applyZoom();
     renderStudioControls();
