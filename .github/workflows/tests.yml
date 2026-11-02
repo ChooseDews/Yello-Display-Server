@@ -14,4 +14,8 @@ jobs:
       - name: Run Rust server tests
         run: cargo test --release --manifest-path server-rs/Cargo.toml
       - name: Check browser JavaScript syntax
-        run: node --check server-rs/static/app.js
+        run: |
+          for f in server-rs/static/js/*.js; do
+            cp "$f" /tmp/check.mjs
+            node --check /tmp/check.mjs
+          done
