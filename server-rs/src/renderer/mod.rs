@@ -486,11 +486,51 @@ pub fn draw_rounded_rect(
     }
 }
 
-pub fn clock_text(props: &Value) -> String {
+// ---------- display timezone ----------
+// All rendered times (clock elements, script now()) use the studio's
+// display timezone, resolved once: $YELLO_TIMEZONE, else $TZ when it is
+// an IANA name, else America/Los_Angeles. The server runs in a container
+// whose system zone is UTC, so chrono::Local read 7-8 hours fast for the
+// studio's Pacific home. A clock element's own `timezone` prop (an IANA
+// name) overrides the studio zone for that element.
+
+pub fn studio_timezone() -> chrono_tz::Tz {
+    use std::str::FromStr;
+    static TZ: std::sync::OnceLock<chrono_tz::Tz> = std::sync::OnceLock::new();
+    *TZ.get_or_init(|| {
+        for var in ["YELLO_TIMEZONE", "TZ"] {
+            if let Ok(raw) = std::env::var(var) {
+                let name = raw.trim().trim_start_matches(':');
+                if let Ok(tz) = chrono_tz::Tz::from_str(name) {
+                    return tz;
+                }
+            }
+        }
+        chrono_tz::America::Los_Angeles
+    })
+}
+
+/// The zone a clock renders in: its `timezone` prop when that names a
+/// valid IANA zone, else the studio's display timezone.
+pub fn display_timezone(prop: &str) -> chrono_tz::Tz {
+    use std::str::FromStr;
+    let name = prop.trim();
+    if !name.is_empty() {
+        if let Ok(tz) = chrono_tz::Tz::from_str(name) {
+            return tz;
+        }
+    }
+    studio_timezone()
+}
+
+fn format_clock_at(props: &Value, instant: chrono::DateTime<chrono::Utc>) -> String {
     let fmt = props.get("format").and_then(|v| v.as_str()).unwrap_or("%H:%M:%S");
-    let _tz_str = props.get("timezone").and_then(|v| v.as_str()).unwrap_or("");
-    let now = chrono::Local::now();
-    now.format(fmt).to_string()
+    let tz = display_timezone(props.get("timezone").and_then(|v| v.as_str()).unwrap_or(""));
+    instant.with_timezone(&tz).format(fmt).to_string()
+}
+
+pub fn clock_text(props: &Value) -> String {
+    format_clock_at(props, chrono::Utc::now())
 }
 
 pub fn ha_text(props: &Value, ctx: &Value) -> String {
@@ -1034,6 +1074,30 @@ mod tests {
             .expect("truetype render");
         let filled = ink(&img);
         assert!(filled > 200, "emoji should render real ink, got {filled}");
+    }
+
+    #[test]
+    fn clock_uses_pacific_by_default() {
+        // Pin the studio zone so the test is independent of the host env.
+        std::env::set_var("YELLO_TIMEZONE", "America/Los_Angeles");
+        let props = serde_json::json!({"format": "%H:%M", "timezone": ""});
+        // Winter: 2026-11-02T16:34:00Z is 08:34 PST (UTC-8).
+        let winter = chrono::DateTime::parse_from_rfc3339("2026-11-02T16:34:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(format_clock_at(&props, winter), "08:34");
+        // Summer: 2026-07-02T16:34:00Z is 09:34 PDT (UTC-7).
+        let summer = chrono::DateTime::parse_from_rfc3339("2026-07-02T16:34:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(format_clock_at(&props, summer), "09:34");
+    }
+
+    #[test]
+    fn clock_honors_named_timezone_prop() {
+        std::env::set_var("YELLO_TIMEZONE", "America/Los_Angeles");
+        let winter = chrono::DateTime::parse_from_rfc3339("2026-11-02T16:34:00Z").unwrap().with_timezone(&chrono::Utc);
+        let east = serde_json::json!({"format": "%H:%M", "timezone": "America/New_York"});
+        assert_eq!(format_clock_at(&east, winter), "11:34");
+        // A bogus zone name falls back to the studio zone, never panics.
+        let bogus = serde_json::json!({"format": "%H:%M", "timezone": "Not/AZone"});
+        assert_eq!(format_clock_at(&bogus, winter), "08:34");
     }
 
     #[test]

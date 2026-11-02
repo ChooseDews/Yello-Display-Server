@@ -506,7 +506,7 @@ impl<'a> Runtime<'a> {
             }
             "now" => {
                 let fmt = if !args.is_empty() { args[0].to_string() } else { "%H:%M".to_string() };
-                let now = chrono::Local::now();
+                let now = chrono::Utc::now().with_timezone(&crate::renderer::studio_timezone());
                 Ok(Val::Str(now.format(&fmt).to_string()))
             }
             "source" => {

@@ -133,7 +133,7 @@ const SYSTEM_PROMPT = `You are the agent built into Yello Studio, a designer for
 
 ## Element types (props; style beyond the common keys)
 - text: props {text, wrap}. Plain label.
-- clock: props {format (strftime, e.g. "%H:%M" or "%a %b %d"), timezone ("" = display local time)}.
+- clock: props {format (strftime, e.g. "%H:%M" or "%a %b %d"), timezone ("" = the studio timezone, America/Los_Angeles; or an IANA zone name like "America/New_York")}.
 - external-text: props {sourceId (a dataSources id), wrap}. Shows fetched text.
 - color-block: style {color, radius}; no props. A filled rectangle.
 - button: props {label, actionId (an actions id, or "" for none)}. style {color = background, fontSize, radius}. Fires its HTTP action when tapped.
@@ -174,7 +174,7 @@ Output — exactly one of two modes per script:
 
 Built-in functions:
 - ha("sensor.x") -> the entity's state (string, or number when the state is numeric). ha("sensor.x", "attribute") -> an attribute value. Missing or errored entities return the string "unavailable"; a missing attribute returns "unknown" — always guard numeric use: number(ha("sensor.x"), fallback).
-- now("%H:%M") -> the local time formatted with strftime codes (default "%H:%M").
+- now("%H:%M") -> the studio time (America/Los_Angeles) formatted with strftime codes (default "%H:%M").
 - number(x, default = 0) -> x as a number, or default when x is not numeric.
 - source("weather") -> the current text of an http-text data source by id (the same values external-text elements display); "" when the source is missing or has not fetched yet.
 - jq(json_text, ".current.temp_c") -> runs a jq program over JSON text (same jq syntax as the jq_read / jq_write tools) and returns the result: a single scalar output comes back as a number / string / bool; objects, arrays and multi-output programs come back as JSON text (feed it back into jq() to dig deeper). Unparsable JSON returns None — guard with == None. A malformed jq program is a script error.
