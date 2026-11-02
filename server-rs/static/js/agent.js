@@ -12,7 +12,8 @@ import { pushHistory } from "./history.js";
 import { renderAll } from "./editor.js";
 import { schedulePreview, syncCodeEditor } from "./canvas.js";
 import { loadDesign, saveLayout } from "./views.js";
-import { toast } from "./dialog.js";
+import { toast, appConfirm } from "./dialog.js";
+import { saveChat, listChats, getChat, deleteChat } from "./chatstore.js";
 
 const KEY_STORAGE = "yello-openrouter-key";
 const MODEL_STORAGE = "yello-openrouter-model";
@@ -593,24 +594,227 @@ async function streamChat(messages) {
       }
     }
   }
-  return { content, toolCalls: [...toolCalls.values()], usage };
+  return { content, reasoning, toolCalls: [...toolCalls.values()], usage };
 }
 
 /** Only the newest view_screen image is worth its tokens on later rounds:
  *  once a newer render exists, older ones collapse to their caption. */
-function compactedHistory() {
+function collapseOldImages(messages) {
   let lastImageIndex = -1;
-  conversation.forEach((message, index) => {
+  messages.forEach((message, index) => {
     if (Array.isArray(message.content) && message.content.some((part) => part.type === "image_url")) {
       lastImageIndex = index;
     }
   });
-  if (lastImageIndex < 0) return conversation;
-  return conversation.map((message, index) => {
+  if (lastImageIndex < 0) return messages;
+  return messages.map((message, index) => {
     if (index >= lastImageIndex || !Array.isArray(message.content)) return message;
     const text = message.content.find((part) => part.type === "text")?.text || "Rendered view:";
-    return { role: "user", content: `${text} [image omitted — a newer render follows]` };
+    return { ...message, content: `${text} [image omitted — a newer render follows]` };
   });
+}
+
+/** Strip local-only fields (e.g. _reasoning) before messages go to the API. */
+function sanitizeMessage(message) {
+  const clean = { role: message.role, content: message.content };
+  if (message.tool_calls) clean.tool_calls = message.tool_calls;
+  if (message.tool_call_id) clean.tool_call_id = message.tool_call_id;
+  return clean;
+}
+
+function compactedHistory() {
+  return collapseOldImages(conversation).map(sanitizeMessage);
+}
+
+// ---------- conversation persistence (IndexedDB) ----------
+
+let currentChatId = null;
+let currentChatCreatedAt = 0;
+
+function chatTitle() {
+  const first = conversation.find((m) => m.role === "user" && typeof m.content === "string");
+  const text = first?.content.trim().replace(/\s+/g, " ") || "";
+  return text ? text.slice(0, 70) : "Chat";
+}
+
+/** Save the current conversation (fire-and-forget; storage failures are
+ *  non-fatal — the chat keeps working in memory). */
+function persistChat() {
+  if (!conversation.some((m) => m.role === "user")) return;
+  const now = Date.now();
+  if (!currentChatId) {
+    currentChatId = `chat-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    currentChatCreatedAt = now;
+  }
+  saveChat({
+    id: currentChatId,
+    title: chatTitle(),
+    createdAt: currentChatCreatedAt,
+    updatedAt: now,
+    model: localStorage.getItem(MODEL_STORAGE) || "",
+    designId: S.currentDesignId || "",
+    designName: S.layout?.name || "",
+    usage: { ...usageTotals },
+    messages: collapseOldImages(conversation),
+  }).catch(() => {});
+}
+
+function startNewChat() {
+  conversation.length = 0;
+  currentChatId = null;
+  currentChatCreatedAt = 0;
+  usageTotals.in = 0;
+  usageTotals.out = 0;
+  usageTotals.cost = 0;
+  renderUsage();
+  $("agent-messages").replaceChildren();
+  greet();
+}
+
+/** Rebuild the chat DOM from a stored message list. */
+function renderConversationDom() {
+  const box = $("agent-messages");
+  box.replaceChildren();
+  for (let i = 0; i < conversation.length; i += 1) {
+    const message = conversation[i];
+    if (message.role === "user" && typeof message.content === "string") {
+      addMessage("user", message.content);
+    } else if (message.role === "user" && Array.isArray(message.content)) {
+      const caption = message.content.find((p) => p.type === "text")?.text || "Rendered view:";
+      const image = message.content.find((p) => p.type === "image_url")?.image_url?.url;
+      const row = document.createElement("div");
+      row.className = "msg-row";
+      const note = document.createElement("div");
+      note.className = "msg view-note";
+      note.textContent = caption;
+      row.append(note);
+      if (image) {
+        const img = document.createElement("img");
+        img.className = "tool-thumb";
+        img.src = image;
+        img.alt = "Rendered screen view";
+        row.append(img);
+      }
+      box.append(row);
+    } else if (message.role === "assistant") {
+      if (message.content || message._reasoning) {
+        const turn = addAssistantTurn();
+        if (message._reasoning) turn.thinkingBody.textContent = message._reasoning;
+        if (message.content) turn.bubble.innerHTML = markdownLite(message.content);
+      }
+      for (const call of message.tool_calls || []) {
+        const toolMessage = conversation
+          .slice(i + 1)
+          .find((m) => m.role === "tool" && m.tool_call_id === call.id);
+        const entry = addToolEntry(call.function.name, call.function.arguments);
+        let parsed = {};
+        try {
+          parsed = JSON.parse(toolMessage?.content || "{}");
+        } catch {
+          parsed = { result: toolMessage?.content || "" };
+        }
+        const failed = Boolean(parsed && (parsed.error || parsed.applied === false || parsed.valid === false));
+        entry.finish(parsed, !failed);
+      }
+    }
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function loadChat(record) {
+  conversation.length = 0;
+  for (const message of record.messages || []) conversation.push(message);
+  currentChatId = record.id;
+  currentChatCreatedAt = record.createdAt || Date.now();
+  usageTotals.in = record.usage?.in || 0;
+  usageTotals.out = record.usage?.out || 0;
+  usageTotals.cost = record.usage?.cost || 0;
+  renderUsage();
+  renderConversationDom();
+  setHistoryOpen(false);
+}
+
+async function restoreLastChat() {
+  try {
+    const chats = await listChats();
+    if (chats.length) {
+      const record = await getChat(chats[0].id);
+      if (record && (record.messages || []).length) {
+        loadChat(record);
+        return;
+      }
+    }
+  } catch { /* storage unavailable — fall through to a fresh chat */ }
+  greet();
+}
+
+// ---------- history view ----------
+
+function setHistoryOpen(open) {
+  $("agent-history-view").classList.toggle("hidden", !open);
+  $("agent-messages").classList.toggle("hidden", open);
+  document.querySelector("#agent-chat-card .agent-composer")?.classList.toggle("hidden", open);
+  if (open) renderHistoryList();
+}
+
+async function renderHistoryList() {
+  const list = $("agent-history-list");
+  list.replaceChildren();
+  const chats = await listChats().catch(() => []);
+  if (!chats.length) {
+    const empty = document.createElement("p");
+    empty.className = "subtle";
+    empty.textContent = "No saved conversations yet.";
+    list.append(empty);
+    return;
+  }
+  for (const chat of chats) {
+    const row = document.createElement("div");
+    row.className = "history-row";
+    const main = document.createElement("div");
+    main.className = "history-main";
+    const title = document.createElement("div");
+    title.className = "history-title";
+    title.textContent = chat.title + (chat.id === currentChatId ? " (current)" : "");
+    const meta = document.createElement("div");
+    meta.className = "history-meta";
+    const when = new Date(chat.updatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const bits = [when, chat.messageCount + " messages"];
+    if (chat.designName) bits.push(`design “${chat.designName}”`);
+    if (chat.model) bits.push(chat.model.split("/").pop());
+    if (chat.usage?.in || chat.usage?.out) bits.push(`${fmtTokens(chat.usage.in)} in · ${fmtTokens(chat.usage.out)} out`);
+    meta.textContent = bits.join(" · ");
+    main.append(title, meta);
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "assign-button";
+    openButton.textContent = "Open";
+    openButton.onclick = async () => {
+      const record = await getChat(chat.id).catch(() => null);
+      if (record) loadChat(record);
+    };
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "danger-button";
+    deleteButton.textContent = "Delete";
+    deleteButton.onclick = async () => {
+      const confirmed = await appConfirm({
+        title: "Delete conversation?",
+        message: `“${chat.title}” will be removed from this browser's history.`,
+        confirmLabel: "Delete",
+      });
+      if (!confirmed) return;
+      await deleteChat(chat.id).catch(() => {});
+      if (chat.id === currentChatId) startNewChat();
+      renderHistoryList();
+    };
+    row.append(main, openButton, deleteButton);
+    list.append(row);
+  }
+}
+
+function fmtTokens(n) {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0);
 }
 
 async function sendAgentMessage() {
@@ -642,7 +846,7 @@ async function sendAgentMessage() {
         contextText += ` Home Assistant entities: ${list}${entities.length > 80 ? " (list truncated)" : ""}.`;
       }
       const context = { role: "system", content: contextText };
-      const { content, toolCalls, usage } = await streamChat([
+      const { content, reasoning, toolCalls, usage } = await streamChat([
         { role: "system", content: SYSTEM_PROMPT },
         context,
         ...compactedHistory(),
@@ -654,6 +858,7 @@ async function sendAgentMessage() {
         renderUsage();
       }
       const assistantMessage = { role: "assistant", content: content || null };
+      if (reasoning) assistantMessage._reasoning = reasoning;
       if (toolCalls.length) {
         assistantMessage.tool_calls = toolCalls.map((call) => ({
           id: call.id,
@@ -693,6 +898,7 @@ async function sendAgentMessage() {
         }
       }
     }
+    persistChat();
   } catch (error) {
     if (error.name !== "AbortError") addMessage("assistant", `⚠ ${error.message}`);
   } finally {
@@ -723,15 +929,9 @@ export function initAgentPage() {
   $("agent-model").onchange = () => localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
   $("agent-send").onclick = sendAgentMessage;
   $("agent-stop").onclick = () => aborter?.abort();
-  $("agent-clear").onclick = () => {
-    conversation.length = 0;
-    usageTotals.in = 0;
-    usageTotals.out = 0;
-    usageTotals.cost = 0;
-    renderUsage();
-    $("agent-messages").replaceChildren();
-    greet();
-  };
+  $("agent-clear").onclick = () => startNewChat();
+  $("agent-history").onclick = () => setHistoryOpen(true);
+  $("agent-history-close").onclick = () => setHistoryOpen(false);
   const devToggle = $("agent-dev");
   const applyDev = () => $("agent-chat-card").classList.toggle("agent-dev", devToggle.checked);
   devToggle.checked = localStorage.getItem("yello-agent-dev") === "1";
@@ -754,7 +954,7 @@ export function initAgentPage() {
     }
   });
   loadModels();
-  greet();
+  restoreLastChat();
 }
 
 function greet() {

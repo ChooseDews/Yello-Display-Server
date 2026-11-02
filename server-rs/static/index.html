@@ -290,7 +290,17 @@
     <section class="settings-card agent-chat-card" id="agent-chat-card">
       <div class="agent-chat-head">
         <span class="agent-chat-title">Chat</span>
-        <label class="agent-dev-toggle"><input type="checkbox" id="agent-dev"> Dev mode</label>
+        <span class="agent-head-tools">
+          <button id="agent-history" type="button" class="assign-button agent-history-button">History</button>
+          <label class="agent-dev-toggle"><input type="checkbox" id="agent-dev"> Dev mode</label>
+        </span>
+      </div>
+      <div id="agent-history-view" class="agent-history hidden">
+        <div class="agent-history-head">
+          <span class="agent-chat-title">Previous conversations</span>
+          <button id="agent-history-close" type="button" class="assign-button agent-history-button">Back to chat</button>
+        </div>
+        <div id="agent-history-list" class="agent-history-list"></div>
       </div>
       <div id="agent-messages" class="agent-messages"></div>
       <div class="agent-composer">
