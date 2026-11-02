@@ -13,7 +13,9 @@ export const PORTRAIT_WIDTH = 240;
 export const PORTRAIT_HEIGHT = 320;
 export const LANDSCAPE_WIDTH = 320;
 export const LANDSCAPE_HEIGHT = 240;
-export const ZOOM_LEVELS = [1, 1.5, 2];
+export const MIN_ZOOM = 0.5;
+export const MAX_ZOOM = 3;
+export const clampZoom = (z) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
 export const TYPE_META = {
   text: { label: "Text", icon: "T" },

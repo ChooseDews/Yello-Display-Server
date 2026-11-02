@@ -16,7 +16,7 @@ export const S = {
   selectedId: null,
   appliedRevision: 0,
   dirty: false,
-  zoomIndex: 2,
+  zoom: 2,
   undoStack: [],
   redoStack: [],
   previewTimer: null,

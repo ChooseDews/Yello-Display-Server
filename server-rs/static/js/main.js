@@ -1,6 +1,6 @@
 // Studio entry point: event wiring, keyboard shortcuts, boot.
 
-import { $, ZOOM_LEVELS, isNarrowScreen } from "./util.js";
+import { $, isNarrowScreen } from "./util.js";
 import { S, displayWidth, displayHeight, activePage, effectiveElements, activePageIdFor } from "./state.js";
 import { toast, isModalOpen, closeAppModal, submitAppModal, appConfirm } from "./dialog.js";
 import { commit, undo, redo, setDocumentState } from "./history.js";
@@ -10,7 +10,7 @@ import {
 } from "./editor.js";
 import {
   setCanvasMode, sendLiveTouch, applyCodeLayout, formatCodeEditor, applyZoom, refreshPreview,
-  showCodeErrors, setCodeEditorState,
+  showCodeErrors, setCodeEditorState, stepZoom, setZoom, initCanvasGestures,
 } from "./canvas.js";
 import { setShowConnections, drawFlowArrows } from "./flow.js";
 import {
@@ -56,13 +56,15 @@ function handleKeyboard(event) {
   }
 }
 
-// Phones get one panel at a time (canvas / blocks / design) switched by
-// the bottom tab bar; desktop ignores data-mobile-panel entirely.
-export function setMobilePanel(name) {
-  document.body.dataset.mobilePanel = name;
-  document.querySelectorAll(".mobile-tabs [data-mobile-panel]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.mobilePanel === name);
-  });
+// Phones get slide-over drawers: Blocks from the left, Attributes from
+// the right, toggled from the top bar; the canvas is always underneath.
+// Desktop ignores data-drawer entirely.
+export function setDrawer(name) {
+  document.body.dataset.drawer = name || "";
+  const blocks = $("toggle-blocks");
+  const attributes = $("toggle-attributes");
+  if (blocks) blocks.setAttribute("aria-pressed", String(name === "blocks"));
+  if (attributes) attributes.setAttribute("aria-pressed", String(name === "attributes"));
 }
 
 function bindEvents() {
@@ -95,15 +97,22 @@ function bindEvents() {
   document.querySelectorAll("[data-add-type]").forEach((button) => {
     button.onclick = () => {
       addElement(button.dataset.addType);
-      if (isNarrowScreen()) setMobilePanel("canvas");
+      if (isNarrowScreen()) setDrawer("");
     };
   });
-  document.querySelectorAll(".mobile-tabs [data-mobile-panel]").forEach((button) => {
-    button.onclick = () => setMobilePanel(button.dataset.mobilePanel);
+  $("toggle-blocks").onclick = () => setDrawer(document.body.dataset.drawer === "blocks" ? "" : "blocks");
+  $("toggle-attributes").onclick = () => setDrawer(document.body.dataset.drawer === "attributes" ? "" : "attributes");
+  document.querySelectorAll(".drawer-close").forEach((button) => {
+    button.onclick = () => setDrawer("");
   });
+  $("drawer-backdrop").onclick = () => setDrawer("");
   document.addEventListener("yello:show-canvas", () => {
-    if (isNarrowScreen()) setMobilePanel("canvas");
+    if (isNarrowScreen()) setDrawer("");
   });
+  initCanvasGestures();
+  // The page itself must never pinch-zoom (the canvas has its own zoom);
+  // iOS Safari-family browsers expose this as a gesture event.
+  document.addEventListener("gesturestart", (event) => event.preventDefault());
   $("add-shared-toggle").onclick = () => {
     S.addAsShared = !S.addAsShared;
     $("add-shared-toggle").classList.toggle("active", S.addAsShared);
@@ -200,8 +209,8 @@ function bindEvents() {
     if (confirmed) saveHomeAssistantSettings(true);
   };
   $("duplicate").onclick = duplicateSelected;
-  $("zoom-out").onclick = () => { S.zoomIndex = Math.max(0, S.zoomIndex - 1); applyZoom(); };
-  $("zoom-in").onclick = () => { S.zoomIndex = Math.min(ZOOM_LEVELS.length - 1, S.zoomIndex + 1); applyZoom(); };
+  $("zoom-out").onclick = () => stepZoom(1 / 1.25);
+  $("zoom-in").onclick = () => stepZoom(1.25);
   $("app-modal-cancel").onclick = () => closeAppModal(null);
   $("app-modal-backdrop").onclick = (event) => {
     if (event.target === $("app-modal-backdrop")) closeAppModal(null);
@@ -234,8 +243,8 @@ async function initialize() {
     S.designRevisions.set(S.currentDesignId, loaded.revision);
     S.activePages.set(S.currentDesignId, activePageIdFor(S.currentDesignId));
     bindEvents();
-    setMobilePanel("canvas");
-    if (isNarrowScreen()) S.zoomIndex = 0;
+    setDrawer("");
+    if (isNarrowScreen()) S.zoom = 1;
     const mcpUrl = `${window.location.origin}/mcp`;
     if ($("mcp-endpoint")) $("mcp-endpoint").textContent = mcpUrl;
     if ($("mcp-config")) {

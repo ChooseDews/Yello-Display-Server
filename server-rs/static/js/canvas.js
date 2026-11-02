@@ -1,7 +1,7 @@
 // Canvas modes (edit / code / live), server previews, zoom, the JSON
 // code editor, and live-mode touch navigation.
 
-import { $, ZOOM_LEVELS } from "./util.js";
+import { $, MIN_ZOOM, MAX_ZOOM, clampZoom } from "./util.js";
 import {
   S, designDims, activePageIdFor, docFor,
   pageOf, homePageIdOf, parseLinkTarget, resolveLinkNode, nodeKey,
@@ -106,8 +106,111 @@ export async function renderFlowPreviews() {
 
 // ---- Zoom ----
 
+export function setZoom(z) {
+  S.zoom = clampZoom(z);
+  applyZoom();
+}
+
+export function stepZoom(factor) {
+  setZoom(S.zoom * factor);
+}
+
+// Pan / pinch / double-tap on the canvas background (anywhere outside the
+// screen itself) moves the view instead of editing: one pointer drags to
+// pan, two pointers pinch to zoom, double-tap toggles 100% / 200%. The
+// page itself never zooms (viewport is locked), so these gestures belong
+// to the canvas. Mouse works too: drag to pan, Ctrl+wheel to zoom.
+export function initCanvasGestures() {
+  const scroller = $("canvas-scroll");
+  if (!scroller || scroller.dataset.gesturesBound) return;
+  scroller.dataset.gesturesBound = "1";
+  const pointers = new Map();
+  let startScroll = null;
+  let startDist = 0;
+  let startZoom = 1;
+  let startMid = null;
+  let moved = false;
+  let lastTap = 0;
+  let suppressClickUntil = 0;
+
+  const onBackground = (event) => !event.target.closest("#stage");
+  const midpoint = () => {
+    const [a, b] = [...pointers.values()];
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  };
+  const distance = () => {
+    const [a, b] = [...pointers.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
+
+  scroller.addEventListener("pointerdown", (event) => {
+    if (!onBackground(event)) return;
+    try { scroller.setPointerCapture(event.pointerId); } catch { /* synthetic or already-released pointer */ }
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    moved = false;
+    if (pointers.size === 1) {
+      startScroll = { left: scroller.scrollLeft, top: scroller.scrollTop, x: event.clientX, y: event.clientY };
+    } else if (pointers.size === 2) {
+      startDist = distance();
+      startZoom = S.zoom;
+      startMid = midpoint();
+      startScroll = { left: scroller.scrollLeft, top: scroller.scrollTop };
+    }
+  });
+  scroller.addEventListener("pointermove", (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size === 1 && startScroll) {
+      const dx = event.clientX - startScroll.x;
+      const dy = event.clientY - startScroll.y;
+      if (Math.abs(dx) + Math.abs(dy) > 6) moved = true;
+      if (moved) {
+        scroller.scrollLeft = startScroll.left - dx;
+        scroller.scrollTop = startScroll.top - dy;
+      }
+    } else if (pointers.size === 2 && startDist > 0) {
+      moved = true;
+      const mid = midpoint();
+      scroller.scrollLeft = startScroll.left - (mid.x - startMid.x);
+      scroller.scrollTop = startScroll.top - (mid.y - startMid.y);
+      setZoom(startZoom * (distance() / startDist));
+    }
+  });
+  const endPointer = (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.delete(event.pointerId);
+    if (moved) suppressClickUntil = Date.now() + 350;
+    if (pointers.size === 0) {
+      if (!moved && event.type === "pointerup") {
+        const now = Date.now();
+        if (now - lastTap < 320) {
+          setZoom(S.zoom > 1.05 ? 1 : 2);
+          lastTap = 0;
+        } else {
+          lastTap = now;
+        }
+      }
+      startScroll = null;
+      startDist = 0;
+    }
+  };
+  scroller.addEventListener("pointerup", endPointer);
+  scroller.addEventListener("pointercancel", endPointer);
+  scroller.addEventListener("click", (event) => {
+    if (Date.now() < suppressClickUntil) {
+      event.stopPropagation();
+      event.preventDefault();
+    }
+  }, true);
+  scroller.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    stepZoom(event.deltaY < 0 ? 1.1 : 1 / 1.1);
+  }, { passive: false });
+}
+
 export function applyZoom() {
-  const zoom = ZOOM_LEVELS[S.zoomIndex];
+  const zoom = S.zoom;
   if (S.flowMode && S.canvasMode === "edit") {
     for (const card of document.querySelectorAll("#flow-canvas .flow-screen")) {
       const designId = card.dataset.designId;
@@ -129,8 +232,8 @@ export function applyZoom() {
       shell.style.height = `${height * zoom}px`;
     }
     $("zoom-label").textContent = `${Math.round(zoom * 100)}%`;
-    $("zoom-out").disabled = S.zoomIndex === 0;
-    $("zoom-in").disabled = S.zoomIndex === ZOOM_LEVELS.length - 1;
+    $("zoom-out").disabled = S.zoom <= MIN_ZOOM;
+    $("zoom-in").disabled = S.zoom >= MAX_ZOOM;
     drawFlowArrows();
     return;
   }
@@ -146,8 +249,8 @@ export function applyZoom() {
   $("device-shell").style.width = `${width * zoom}px`;
   $("device-shell").style.height = `${height * zoom}px`;
   $("zoom-label").textContent = `${Math.round(zoom * 100)}%`;
-  $("zoom-out").disabled = S.canvasMode === "code" || S.zoomIndex === 0;
-  $("zoom-in").disabled = S.canvasMode === "code" || S.zoomIndex === ZOOM_LEVELS.length - 1;
+  $("zoom-out").disabled = S.canvasMode === "code" || S.zoom <= MIN_ZOOM;
+  $("zoom-in").disabled = S.canvasMode === "code" || S.zoom >= MAX_ZOOM;
 }
 
 // ---- Code editor ----
@@ -270,8 +373,8 @@ export async function setCanvasMode(mode) {
   $("device-shell").classList.toggle("hidden", flowVisible);
   $("canvas-overlay").classList.toggle("hidden", mode !== "edit");
   $("live-touch-overlay").classList.toggle("hidden", mode !== "live");
-  $("zoom-out").disabled = mode === "code" || S.zoomIndex === 0;
-  $("zoom-in").disabled = mode === "code" || S.zoomIndex === ZOOM_LEVELS.length - 1;
+  $("zoom-out").disabled = mode === "code" || S.zoom <= MIN_ZOOM;
+  $("zoom-in").disabled = mode === "code" || S.zoom >= MAX_ZOOM;
   if (mode === "live") {
     if (S.flowMode && S.editingDesignId !== S.currentDesignId) {
       S.editingDesignId = S.currentDesignId;

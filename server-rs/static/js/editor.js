@@ -1,7 +1,7 @@
 // Canvas editor: element operations, page strip, layers, overlays,
 // pointer interactions, inspector, and the renderAll() hub.
 
-import { $, clone, TYPE_META, ZOOM_LEVELS } from "./util.js";
+import { $, clone, TYPE_META } from "./util.js";
 import {
   S, displayWidth, displayHeight, designDims, designNameOf,
   activePage, activePageIdFor, setActivePage, homePageIdOf, pageOf,
@@ -321,20 +321,28 @@ export function renderPageStrip() {
   }
   const actions = document.createElement("div");
   actions.className = "page-actions";
-  const add = (label, title, handler, disabled = false) => {
+  const add = (icon, label, title, handler, disabled = false) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = label;
+    const iconSpan = document.createElement("span");
+    iconSpan.className = "pa-icon";
+    iconSpan.setAttribute("aria-hidden", "true");
+    iconSpan.textContent = icon;
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "pa-label";
+    labelSpan.textContent = label;
+    button.append(iconSpan, labelSpan);
     button.title = title;
+    button.setAttribute("aria-label", title);
     button.disabled = disabled;
     button.onclick = handler;
     actions.append(button);
   };
-  add("＋ Page", "Add a page to this design", () => addPage());
-  add("Rename", "Rename the current page", () => renamePage());
-  add("Duplicate", "Duplicate the current page", () => duplicatePage());
-  add("Set home", "Make the current page the design's home page", () => setHomePage(), S.layout.homePageId === current);
-  add("Delete", "Delete the current page", () => deletePage(), S.layout.pages.length <= 1);
+  add("＋", "Page", "Add a page to this design", () => addPage());
+  add("✎", "Rename", "Rename the current page", () => renamePage());
+  add("⧉", "Duplicate", "Duplicate the current page", () => duplicatePage());
+  add("⌂", "Set home", "Make the current page the design's home page", () => setHomePage(), S.layout.homePageId === current);
+  add("✕", "Delete", "Delete the current page", () => deletePage(), S.layout.pages.length <= 1);
   strip.append(actions);
 }
 
@@ -466,7 +474,7 @@ export function beginPointerInteraction(event, element, handle, designId = S.cur
     event.currentTarget.closest(".element-box")?.classList.add("selected");
   }
   if (element.locked) return;
-  const zoom = ZOOM_LEVELS[S.zoomIndex];
+  const zoom = S.zoom;
   const origin = clone(element.frame);
   const startX = event.clientX;
   const startY = event.clientY;
