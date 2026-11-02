@@ -26,6 +26,10 @@ export const TYPE_META = {
   "ha-state": { label: "HA sensor", icon: "⌁" },
   "ha-toggle": { label: "HA toggle", icon: "⏻" },
   script: { label: "Script", icon: "{ }" },
+  screen: { label: "Screen embed", icon: "▦" },
+  gauge: { label: "Gauge", icon: "▰" },
+  qr: { label: "QR code", icon: "▩" },
+  shape: { label: "Shape", icon: "●" },
 };
 
 export function compactNumber(value) {

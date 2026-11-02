@@ -206,8 +206,8 @@ pub struct Studio {
 
 impl Studio {
     pub fn new(initial_layout: Option<Value>) -> Self {
-        let layout = validate_design(initial_layout.unwrap_or_else(default_layout))
-            .unwrap_or_else(|_| migrate_design_to_v2(default_layout()));
+        let layout = validate_design(initial_layout.unwrap_or_else(default_design))
+            .unwrap_or_else(|_| default_design());
         let name = layout.get("name").and_then(|v| v.as_str()).unwrap_or("Default design").to_string();
         let mut designs = HashMap::new();
         designs.insert(
@@ -295,8 +295,7 @@ impl AppState {
     pub async fn load_studio_file(&self) {
         match tokio::fs::read_to_string(&self.studio_path).await {
             Ok(content) => match serde_json::from_str::<Value>(&content) {
-                Ok(val) if matches!(val.get("schemaVersion").and_then(|v| v.as_i64()), Some(1) | Some(2)) => {
-                    let file_version = val.get("schemaVersion").and_then(|v| v.as_i64()).unwrap_or(1);
+                Ok(val) if val.get("schemaVersion").and_then(|v| v.as_i64()) == Some(2) => {
                     if let Some(designs_map) = val.get("designs").and_then(|v| v.as_object()) {
                         let mut designs = HashMap::new();
                         for (d_id, d_rec) in designs_map {
@@ -331,24 +330,6 @@ impl AppState {
                                 let mut st = self.studio.write().await;
                                 st.designs = designs;
                                 st.screens = screens;
-                            }
-                            if file_version < DESIGN_SCHEMA_VERSION as i64 {
-                                // One-time v1 -> v2 migration: keep the
-                                // original document next to the studio
-                                // file, then persist the migrated one.
-                                let backup = self.studio_path.with_file_name(format!(
-                                    "{}.v1.bak",
-                                    self.studio_path.file_name().and_then(|n| n.to_str()).unwrap_or("studio.json")
-                                ));
-                                if !tokio::fs::try_exists(&backup).await.unwrap_or(false) {
-                                    let _ = write_atomic(&backup, content.as_bytes()).await;
-                                }
-                                eprintln!(
-                                    "migrated studio file {} from schema v{file_version} to v{DESIGN_SCHEMA_VERSION} (backup: {})",
-                                    self.studio_path.display(),
-                                    backup.display()
-                                );
-                                self.save_studio_file().await;
                             }
                             return;
                         }
@@ -507,6 +488,9 @@ pub fn cross_design_link_errors(studio: &Studio, self_id: &str, layout: &Value) 
         _ => {}
     };
 
+    // Screen-embed errors collect separately: the `check` closure
+    // holds `errors` mutably for the whole scan.
+    let mut embed_errors: Vec<LayoutError> = Vec::new();
     if let Some(pages) = layout.get("pages").and_then(|p| p.as_array()) {
         for (pi, page) in pages.iter().enumerate() {
             if let Some(elements) = page.get("elements").and_then(|e| e.as_array()) {
@@ -514,6 +498,9 @@ pub fn cross_design_link_errors(studio: &Studio, self_id: &str, layout: &Value) 
                     if el.get("type").and_then(|t| t.as_str()) == Some("design-link") {
                         let target = el.get("props").and_then(|p| p.get("targetDesignId")).and_then(|t| t.as_str()).unwrap_or("");
                         check(target, format!("pages[{pi}].elements[{ei}].props.targetDesignId"));
+                    }
+                    if el.get("type").and_then(|t| t.as_str()) == Some("screen") {
+                        check_screen_embed(studio, self_id, layout, el, format!("pages[{pi}].elements[{ei}]"), &mut embed_errors);
                     }
                 }
             }
@@ -525,9 +512,51 @@ pub fn cross_design_link_errors(studio: &Studio, self_id: &str, layout: &Value) 
                 let target = el.get("props").and_then(|p| p.get("targetDesignId")).and_then(|t| t.as_str()).unwrap_or("");
                 check(target, format!("sharedElements[{ei}].props.targetDesignId"));
             }
+                    if el.get("type").and_then(|t| t.as_str()) == Some("screen") {
+                        check_screen_embed(studio, self_id, layout, el, format!("sharedElements[{ei}]"), &mut embed_errors);
+                    }
         }
     }
+    errors.extend(embed_errors);
     errors
+}
+
+/// Cross-design check for one embedded-screen element: the target
+/// design must exist, and a named target page must exist in it. An
+/// empty designId embeds the design being saved (its pages were
+/// already checked by validate_design).
+pub fn check_screen_embed(
+    studio: &Studio,
+    self_id: &str,
+    self_layout: &Value,
+    el: &Value,
+    path: String,
+    errors: &mut Vec<LayoutError>,
+) {
+    let props = el.get("props").unwrap_or(&Value::Null);
+    let design_id = props.get("designId").and_then(|t| t.as_str()).unwrap_or("");
+    let page_id = props.get("pageId").and_then(|t| t.as_str()).unwrap_or("");
+    if design_id.is_empty() {
+        return;
+    }
+    let target_layout = if design_id == self_id {
+        Some(self_layout)
+    } else {
+        studio.designs.get(design_id).map(|d| &d.layout)
+    };
+    match target_layout {
+        None => errors.push(LayoutError {
+            path: format!("{path}.props.designId"),
+            message: format!("embeds unknown design '{design_id}'"),
+        }),
+        Some(l) if !page_id.is_empty() && !design_page_exists(l, page_id) => {
+            errors.push(LayoutError {
+                path: format!("{path}.props.pageId"),
+                message: format!("embeds unknown page '{page_id}' in design '{design_id}'"),
+            })
+        }
+        _ => {}
+    }
 }
 
 pub fn build_render_context(
@@ -560,6 +589,68 @@ pub fn build_render_context(
         "pressed": Value::Array(pressed_arr),
         "dots": Value::Array(dots_arr)
     })
+}
+
+/// Resolve embedded-screen elements in an effective page layout:
+/// pre-render each target page and add it to the images map under
+/// embed:<elementId>. Embeds render one level deep against the base
+/// image map, so embedding cycles (including a page embedding itself)
+/// terminate with the placeholder the renderer draws for a missing
+/// embed. View-only: touches are not forwarded into embedded screens.
+pub async fn with_embed_images(
+    state: &Arc<AppState>,
+    design_id: &str,
+    layout: &Value,
+    mut images: HashMap<String, Arc<RgbImage>>,
+) -> HashMap<String, Arc<RgbImage>> {
+    let targets: Vec<(String, String, String)> = layout
+        .get("elements")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|el| {
+                    el.get("type").and_then(|t| t.as_str()) == Some("screen")
+                        && el.get("visible").and_then(|v| v.as_bool()) != Some(false)
+                })
+                .map(|el| {
+                    (
+                        el.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        el.get("props").and_then(|p| p.get("designId")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        el.get("props").and_then(|p| p.get("pageId")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if targets.is_empty() {
+        return images;
+    }
+    let base_images = images.clone();
+    let ext_vals = state.external_values.read().await.clone();
+    let ha_vals = state.ha_values.read().await.clone();
+    let empty_set = HashSet::new();
+    let empty_dots: Vec<(i32, i32, Instant)> = Vec::new();
+    for (element_id, target_design_prop, target_page_prop) in targets {
+        if element_id.is_empty() {
+            continue;
+        }
+        let target_design_id = if target_design_prop.is_empty() { design_id } else { target_design_prop.as_str() };
+        let target_layout = {
+            let studio = state.studio.read().await;
+            studio.designs.get(target_design_id).map(|d| d.layout.clone())
+        };
+        let Some(target_design) = target_layout else { continue };
+        let page_id = if target_page_prop.is_empty() {
+            design_home_page_id(&target_design)
+        } else {
+            target_page_prop
+        };
+        let Some(effective) = effective_page_layout(&target_design, &page_id) else { continue };
+        let ctx = build_render_context(&ext_vals, target_design_id, &ha_vals, &empty_set, &empty_dots);
+        let img = renderer::render(&effective, &ctx, &base_images);
+        images.insert(format!("embed:{element_id}"), Arc::new(img));
+    }
+    images
 }
 
 pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> Result<(), String> {
@@ -637,6 +728,7 @@ pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> R
     let ha_vals = state.ha_values.read().await.clone();
     let ctx = build_render_context(&ext_vals, &design_id, &ha_vals, &pressed, &dots);
     let images = state.images.read().await.clone();
+    let images = with_embed_images(state, &design_id, &layout, images).await;
     let frame = renderer::render(&layout, &ctx, &images);
 
     let now = Instant::now();
@@ -978,7 +1070,9 @@ pub fn start_background_tasks(state: Arc<AppState>) {
                     for elem in all_design_elements(&design.layout) {
                         let etype = elem.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         let props = elem.get("props").unwrap_or(&Value::Null);
-                        if etype == "ha-state" || etype == "ha-toggle" {
+                        let gauge_ha = etype == "gauge"
+                            && props.get("sourceKind").and_then(|v| v.as_str()) == Some("ha");
+                        if etype == "ha-state" || etype == "ha-toggle" || gauge_ha {
                             let eid = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
                             let refresh = props.get("refreshInterval").and_then(|v| v.as_u64()).unwrap_or(5);
                             if !eid.is_empty() {
@@ -1312,7 +1406,7 @@ async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: 
             .designs
             .get(&d_id)
             .map(|d| d.layout.clone())
-            .unwrap_or_else(|| migrate_design_to_v2(default_layout()));
+            .unwrap_or_else(|| default_design());
         let lay = effective_page_layout(&design_layout, &p_id).unwrap_or_else(default_layout);
         (d_id, lay)
     };
@@ -1563,6 +1657,7 @@ pub async fn handle_http_request(
                         };
                         let ctx = build_render_context(&ext_vals, &design_id, &ha_vals, &pressed, &dots);
                         let images = state.images.read().await.clone();
+                        let images = with_embed_images(&state, &design_id, &layout, images).await;
                         let img = renderer::render(&layout, &ctx, &images);
                         png_response(&img)
                     }
@@ -1592,6 +1687,7 @@ pub async fn handle_http_request(
                     let images = state.images.read().await.clone();
                     let page_id = page_param.unwrap_or_else(|| design_home_page_id(&design.layout));
                     let layout = effective_page_layout(&design.layout, &page_id).unwrap_or_else(default_layout);
+                    let images = with_embed_images(&state, &design_id, &layout, images).await;
                     let img = renderer::render(&layout, &ctx, &images);
                     png_response(&img)
                 }
@@ -1609,6 +1705,7 @@ pub async fn handle_http_request(
                 let ctx = build_render_context(&ext_vals, design_id, &ha_vals, &empty_set, &empty_dots);
                 let images = state.images.read().await.clone();
                 let layout = effective_page_layout(&design.layout, &design_home_page_id(&design.layout)).unwrap_or_else(default_layout);
+                let images = with_embed_images(&state, design_id, &layout, images).await;
                 let img = renderer::render(&layout, &ctx, &images);
                 png_response(&img)
             } else {
@@ -1619,6 +1716,7 @@ pub async fn handle_http_request(
             let types = [
                 "text", "clock", "external-text", "color-block", "button",
                 "design-link", "image", "ha-state", "ha-toggle", "script",
+                "screen", "gauge", "qr", "shape",
             ];
             let mut element_defaults = serde_json::Map::new();
             for element_type in types {
@@ -1733,7 +1831,7 @@ pub async fn handle_http_request(
                 let clone_from = raw.get("cloneFrom").and_then(|v| v.as_str()).unwrap_or(DEFAULT_DESIGN_ID).to_string();
                 let mut layout = {
                     let studio = state.studio.read().await;
-                    studio.designs.get(&clone_from).map(|d| d.layout.clone()).unwrap_or_else(default_layout)
+                    studio.designs.get(&clone_from).map(|d| d.layout.clone()).unwrap_or_else(default_design)
                 };
                 layout["name"] = json!(name);
                 if let Some(orientation) = raw.get("orientation").and_then(|v| v.as_str()) {
@@ -1741,7 +1839,7 @@ pub async fn handle_http_request(
                         layout["orientation"] = json!(orientation);
                     }
                 }
-                let normalized = validate_design(layout).unwrap_or_else(|_| migrate_design_to_v2(default_layout()));
+                let normalized = validate_design(layout).unwrap_or_else(|_| default_design());
 
                 let id = format!("design_{:x}", Utc::now().timestamp_micros());
                 let mut studio = state.studio.write().await;

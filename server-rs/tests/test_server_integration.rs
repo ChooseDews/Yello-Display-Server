@@ -64,7 +64,7 @@ async fn test_api_layout_validation_and_preview() {
     ));
 
     // Test POST /api/layout/validate
-    let valid_layout = default_layout();
+    let valid_layout = default_design();
     let req = Request::builder()
         .method(Method::POST)
         .uri("/api/layout/validate")
@@ -257,7 +257,7 @@ async fn test_live_touch_endpoint() {
 
     // Tap on the empty background of the default layout: accepted, recorded
     // in the design's live preview state, and no navigation is reported.
-    let body = json!({ "layout": default_layout(), "x": 4, "y": 4, "touchType": "down" });
+    let body = json!({ "layout": default_design(), "x": 4, "y": 4, "touchType": "down" });
     let req = Request::builder()
         .method(Method::POST)
         .uri("/api/live-touch?design=default")
@@ -277,8 +277,8 @@ async fn test_live_touch_endpoint() {
     }
 
     // Tap on a full-screen design-link: the Studio is told where to go.
-    let mut layout = default_layout();
-    layout["elements"] = json!([{
+    let mut layout = default_design();
+    layout["pages"][0]["elements"] = json!([{
         "id": "link1", "type": "design-link", "name": "Open", "visible": true, "locked": false,
         "frame": { "x": 0, "y": 0, "w": 240, "h": 320 },
         "style": { "color": "#6b9cff", "fontSize": 16, "radius": 8 },

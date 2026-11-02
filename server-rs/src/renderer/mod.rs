@@ -516,6 +516,57 @@ pub fn fit_image(source: &RgbImage, width: u32, height: u32, fit: &str) -> RgbIm
     }
 }
 
+/// Fill an ellipse (scanline distance test), clipped to the image.
+pub fn fill_ellipse(img: &mut RgbImage, cx: i32, cy: i32, rx: i32, ry: i32, color: (u8, u8, u8)) {
+    if rx <= 0 || ry <= 0 {
+        return;
+    }
+    let rgb = Rgb([color.0, color.1, color.2]);
+    for dy in -ry..=ry {
+        let py = cy + dy;
+        if py < 0 || py >= img.height() as i32 {
+            continue;
+        }
+        let t = dy as f64 / ry as f64;
+        let half = (rx as f64 * (1.0 - t * t).sqrt()).round() as i32;
+        for dx in -half..=half {
+            let px = cx + dx;
+            if px < 0 || px >= img.width() as i32 {
+                continue;
+            }
+            img.put_pixel(px as u32, py as u32, rgb);
+        }
+    }
+}
+
+/// The numeric value behind a gauge element, from its configured
+/// source: a Home Assistant entity state, an external data source, or
+/// the static value prop. None when no numeric value is available.
+pub fn gauge_value(props: &Value, ctx: &Value) -> Option<f64> {
+    let parse = |raw: &Value| -> Option<f64> {
+        match raw {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }
+    };
+    match props.get("sourceKind").and_then(|v| v.as_str()).unwrap_or("static") {
+        "ha" => {
+            let entity_id = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
+            let ent = ctx.get("homeAssistant").and_then(|h| h.get(entity_id))?;
+            if ent.get("error").and_then(|v| v.as_bool()) == Some(true) {
+                return None;
+            }
+            parse(ent.get("state")?)
+        }
+        "external" => {
+            let source_id = props.get("sourceId").and_then(|v| v.as_str()).unwrap_or("");
+            parse(ctx.get("external").and_then(|e| e.get(source_id))?)
+        }
+        _ => props.get("value").and_then(|v| v.as_f64()),
+    }
+}
+
 pub fn render(
     layout: &Value,
     ctx: &Value,
@@ -672,6 +723,157 @@ pub fn render(
                             "verticalAlign": "middle"
                         });
                         draw_text_box(&mut img, fx, fy, fw, fh, "image", &label_style, false);
+                    }
+                }
+                "screen" => {
+                    // Embedded screen: the server pre-renders the target
+                    // page into the images map under embed:<elementId>.
+                    let key = format!("embed:{elem_id}");
+                    if let Some(source) = images.get(&key) {
+                        let fitted = image::imageops::resize(
+                            source.as_ref(),
+                            fw,
+                            fh,
+                            image::imageops::FilterType::Nearest,
+                        );
+                        for dy in 0..fh {
+                            let py = fy + dy as i32;
+                            if py < 0 || py >= img.height() as i32 { continue; }
+                            for dx in 0..fw {
+                                let px = fx + dx as i32;
+                                if px < 0 || px >= img.width() as i32 { continue; }
+                                img.put_pixel(px as u32, py as u32, *fitted.get_pixel(dx, dy));
+                            }
+                        }
+                    } else {
+                        draw_rounded_rect(&mut img, fx, fy, fw, fh, (24, 26, 40), 0, Some(((105, 110, 125), 1)));
+                        let label_style = serde_json::json!({
+                            "fontSize": 11,
+                            "color": "#aeb4c5",
+                            "align": "center",
+                            "verticalAlign": "middle"
+                        });
+                        draw_text_box(&mut img, fx, fy, fw, fh, "screen", &label_style, false);
+                    }
+                }
+                "gauge" => {
+                    let track = parse_color(style.get("trackColor").unwrap_or(&Value::Null), (42, 47, 58));
+                    let fill = parse_color(style.get("color").unwrap_or(&Value::Null), (87, 199, 133));
+                    let radius = fh / 2;
+                    draw_rounded_rect(&mut img, fx, fy, fw, fh, track, radius, None);
+                    let min = props.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let max = props.get("max").and_then(|v| v.as_f64()).unwrap_or(100.0);
+                    let text = match gauge_value(props, ctx) {
+                        Some(value) => {
+                            let frac = if max > min {
+                                ((value - min) / (max - min)).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            if frac > 0.0 {
+                                let fill_w = ((fw as f64 * frac).round() as u32).max(fh).min(fw);
+                                draw_rounded_rect(&mut img, fx, fy, fill_w, fh, fill, radius, None);
+                            }
+                            let decimals = props.get("decimals").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            let unit = props.get("unit").and_then(|v| v.as_str()).unwrap_or("");
+                            let num = format!("{:.prec$}", value, prec = decimals);
+                            if unit.is_empty() {
+                                num
+                            } else if unit.starts_with('%') || unit.starts_with('°') {
+                                format!("{num}{unit}")
+                            } else {
+                                format!("{num} {unit}")
+                            }
+                        }
+                        None => "…".to_string(),
+                    };
+                    if props.get("showValue").and_then(|v| v.as_bool()).unwrap_or(true) {
+                        let base = if gauge_value(props, ctx).is_some() { fill } else { track };
+                        let text_color = if brightness(base) > 140.0 { "#000000" } else { "#ffffff" };
+                        let text_style = serde_json::json!({
+                            "fontSize": style.get("fontSize").and_then(|v| v.as_u64()).unwrap_or(14),
+                            "color": text_color,
+                            "align": "center",
+                            "verticalAlign": "middle"
+                        });
+                        draw_text_box(&mut img, fx, fy, fw, fh, &text, &text_style, false);
+                    }
+                }
+                "qr" => {
+                    let text = props.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    let dark = parse_color(style.get("color").unwrap_or(&Value::Null), (17, 17, 17));
+                    let light = parse_color(style.get("bgColor").unwrap_or(&Value::Null), (255, 255, 255));
+                    match qrcode::QrCode::new(text.as_bytes()) {
+                        Ok(code) => {
+                            let n = code.width() as i32;
+                            let quiet = 2i32;
+                            let total = n + quiet * 2;
+                            let cell = ((fw.min(fh) as i32) / total).max(1);
+                            let drawn = cell * total;
+                            let ox = fx + (fw as i32 - drawn) / 2;
+                            let oy = fy + (fh as i32 - drawn) / 2;
+                            draw_rounded_rect(&mut img, ox, oy, drawn as u32, drawn as u32, light, 0, None);
+                            let colors = code.to_colors();
+                            for my in 0..n {
+                                for mx in 0..n {
+                                    if colors[(my * n + mx) as usize] == qrcode::Color::Dark {
+                                        draw_rounded_rect(
+                                            &mut img,
+                                            ox + (mx + quiet) * cell,
+                                            oy + (my + quiet) * cell,
+                                            cell as u32,
+                                            cell as u32,
+                                            dark,
+                                            0,
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            draw_rounded_rect(&mut img, fx, fy, fw, fh, light, 0, None);
+                            let label_style = serde_json::json!({
+                                "fontSize": 11,
+                                "color": "#b03040",
+                                "align": "center",
+                                "verticalAlign": "middle"
+                            });
+                            draw_text_box(&mut img, fx, fy, fw, fh, "QR too long", &label_style, false);
+                        }
+                    }
+                }
+                "shape" => {
+                    let fill = parse_color(style.get("color").unwrap_or(&Value::Null), (142, 107, 200));
+                    let outline_color = style.get("outlineColor").and_then(|v| v.as_str()).unwrap_or("");
+                    let outline_w = style.get("outlineWidth").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let outline = if outline_w > 0 && !outline_color.is_empty() {
+                        Some(parse_color(style.get("outlineColor").unwrap_or(&Value::Null), (255, 255, 255)))
+                    } else {
+                        None
+                    };
+                    match props.get("shape").and_then(|v| v.as_str()).unwrap_or("rect") {
+                        "circle" | "ellipse" => {
+                            let cx = fx + fw as i32 / 2;
+                            let cy = fy + fh as i32 / 2;
+                            let (rx, ry) = if props.get("shape").and_then(|v| v.as_str()) == Some("circle") {
+                                let r = (fw.min(fh) / 2) as i32;
+                                (r, r)
+                            } else {
+                                ((fw / 2) as i32, (fh / 2) as i32)
+                            };
+                            if let Some(oc) = outline {
+                                fill_ellipse(&mut img, cx, cy, rx, ry, oc);
+                                fill_ellipse(&mut img, cx, cy, rx - outline_w as i32, ry - outline_w as i32, fill);
+                            } else {
+                                fill_ellipse(&mut img, cx, cy, rx, ry, fill);
+                            }
+                        }
+                        _ => {
+                            let rad = style.get("radius").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let ol = outline.map(|c| (c, outline_w as u32));
+                            draw_rounded_rect(&mut img, fx, fy, fw, fh, fill, rad, ol);
+                        }
                     }
                 }
                 _ => {}

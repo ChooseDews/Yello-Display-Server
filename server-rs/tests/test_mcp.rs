@@ -114,8 +114,8 @@ async fn test_mcp_design_round_trip() {
     let result = call_tool(&state, "yello_get_design", json!({"designId": "default"})).await;
     assert_eq!(result["isError"], false);
 
-    // Save a new design (v1-shaped document; the server migrates it).
-    let mut layout = default_layout();
+    // Save a new design.
+    let mut layout = default_design();
     layout["name"] = json!("Agent made");
     let result = call_tool(
         &state,
@@ -134,7 +134,7 @@ async fn test_mcp_design_round_trip() {
     assert!(text.contains("Agent made"), "get text: {}", text);
 
     // Saving again bumps the revision.
-    let mut layout = default_layout();
+    let mut layout = default_design();
     layout["name"] = json!("Agent made v2");
     let result = call_tool(
         &state,
@@ -163,7 +163,7 @@ async fn test_mcp_preview_returns_png() {
     let result = call_tool(
         &state,
         "yello_preview_design",
-        json!({"layout": default_layout()}),
+        json!({"layout": default_design()}),
     )
     .await;
     assert_eq!(result["isError"], false);
@@ -179,8 +179,8 @@ async fn test_mcp_validation_errors_are_tool_errors() {
     let state = test_state();
 
     // A page: link to a page that does not exist must be rejected.
-    let mut bad = default_layout();
-    bad["elements"] = json!([{
+    let mut bad = default_design();
+    bad["pages"][0]["elements"] = json!([{
         "id": "b1", "type": "design-link",
         "frame": {"x": 10, "y": 10, "w": 100, "h": 40},
         "style": {},

@@ -302,6 +302,7 @@ async fn tool_preview_design(state: &Arc<AppState>, args: &Value) -> Value {
     let dots: Vec<(i32, i32, Instant)> = Vec::new();
     let ctx = build_render_context(&ext_vals, &design_id, &ha_vals, &pressed, &dots);
     let images = state.images.read().await.clone();
+    let images = crate::server::with_embed_images(state, &design_id, &layout, images).await;
     let img = renderer::render(&layout, &ctx, &images);
     let (width, height) = (img.width(), img.height());
     let mut buf = Vec::new();

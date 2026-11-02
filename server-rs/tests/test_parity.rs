@@ -5,27 +5,11 @@ use yello_server::*;
 #[test]
 fn test_default_layout_is_valid_and_normalized() {
     let layout = validate_layout(default_layout()).unwrap();
-    assert_eq!(layout["schemaVersion"], 1);
+    // Page bodies carry no schema version; it lives on the design doc.
+    assert!(layout.get("schemaVersion").is_none());
     let elements = layout["elements"].as_array().unwrap();
     let types: Vec<&str> = elements.iter().map(|e| e["type"].as_str().unwrap()).collect();
     assert_eq!(types, vec!["clock", "clock", "color-block", "text"]);
-}
-
-#[test]
-fn test_legacy_layout_migration() {
-    let legacy = json!({
-        "background": "#010203",
-        "elements": [
-            {"id": "weather", "type": "external", "x": 120, "y": 40, "url": "https://example.com/value", "interval": 30},
-            {"id": "go", "type": "button", "x": 10, "y": 20, "w": 90, "h": 40, "label": "Go", "action": "https://example.com/go"}
-        ]
-    });
-    let layout = validate_layout(legacy).unwrap();
-    let elements = layout["elements"].as_array().unwrap();
-    assert_eq!(elements[0]["type"], "external-text");
-    assert_eq!(elements[0]["frame"]["x"], 0);
-    assert_eq!(elements[0]["props"]["sourceId"], layout["dataSources"][0]["id"]);
-    assert_eq!(elements[1]["props"]["actionId"], layout["actions"][0]["id"]);
 }
 
 #[test]

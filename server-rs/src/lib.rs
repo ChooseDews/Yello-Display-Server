@@ -16,9 +16,9 @@ pub use layout_model::{
     Orientation, DisplayOrientation, LayoutValidationError, LayoutError,
     Layout, DataSource, Action, Frame, Element, ElementStyle,
     Screen, DEFAULT_DESIGN_ID, default_layout, layout_dimensions, validate_layout,
-    new_element, migrate_layout,
+    new_element, default_design,
     DESIGN_SCHEMA_VERSION, DEFAULT_PAGE_ID, NavTarget, parse_nav_target,
-    migrate_design_to_v2, validate_design, design_home_page_id, effective_page_layout,
+    validate_design, design_home_page_id, effective_page_layout,
 };
 
 pub use protocol::{
@@ -38,6 +38,7 @@ pub use server::{
     push_frame, push_design, design_id_for_session, handle_http_request, handle_device_ws,
     start_background_tasks, write_atomic,
     active_target, home_target, apply_navigation, cross_design_link_errors,
+    with_embed_images, check_screen_embed,
     all_design_elements, design_image_sources, design_page_exists,
 };
 

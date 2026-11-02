@@ -702,9 +702,62 @@ export function renderInspector() {
     help.className = "integration-help";
     help.textContent = "Allowed: text, ha, now, number, clamp, rect, line, circle, label, clear, bounded range loops, and basic math. Scripts cannot access files or the network.";
     container.append(help);
+  } else if (element.type === "screen") {
+    const designOptions = [["", "This design"], ...(S.studio.designs || []).map((design) => [design.id, design.name])];
+    appendField(container, "Design", element.props.designId, { type: "select", options: designOptions }, (value) => {
+      element.props.designId = value;
+      renderInspector();
+    });
+    const targetDoc = !element.props.designId
+      ? S.layout
+      : (element.props.designId === (S.editingDesignId ?? S.currentDesignId) ? S.layout : S.designLayouts.get(element.props.designId));
+    if (targetDoc?.pages) {
+      appendField(
+        container, "Page", element.props.pageId,
+        { type: "select", options: [["", "Home page"], ...targetDoc.pages.map((page) => [page.id, page.name])] },
+        (value) => { element.props.pageId = value; },
+      );
+    } else {
+      appendField(container, "Page ID", element.props.pageId, { type: "text" }, (value) => { element.props.pageId = value; });
+    }
+    const help = document.createElement("p");
+    help.className = "integration-help";
+    help.textContent = "Shows another page rendered live inside this block — a screen within a screen. View-only: buttons inside the embedded page don't respond to touches, and embeds render one level deep.";
+    container.append(help);
+  } else if (element.type === "gauge") {
+    appendField(container, "Source", element.props.sourceKind, { type: "select", options: [["static", "Static value"], ["external", "Data source"], ["ha", "Home Assistant"]] }, (value) => {
+      element.props.sourceKind = value;
+      renderInspector();
+    });
+    if (element.props.sourceKind === "static") {
+      appendField(container, "Value", element.props.value, { type: "number" }, (value) => { element.props.value = value; });
+    } else if (element.props.sourceKind === "external") {
+      appendField(container, "Data source", element.props.sourceId, { type: "select", options: [["", "Choose a source…"], ...(S.layout.dataSources || []).map((source) => [source.id, source.name])] }, (value) => { element.props.sourceId = value; });
+    } else if (element.props.sourceKind === "ha") {
+      appendHomeAssistantEntityField(container, element.props.entityId, (value) => { element.props.entityId = value; });
+      appendField(container, "Refresh (s)", element.props.refreshInterval, { type: "number", min: 1, max: 3600 }, (value) => { element.props.refreshInterval = value; });
+    }
+    appendField(container, "Min", element.props.min, { type: "number" }, (value) => { element.props.min = value; });
+    appendField(container, "Max", element.props.max, { type: "number" }, (value) => { element.props.max = value; });
+    appendField(container, "Decimals", element.props.decimals, { type: "number", min: 0, max: 6 }, (value) => { element.props.decimals = value; });
+    appendField(container, "Unit", element.props.unit, { type: "text" }, (value) => { element.props.unit = value; });
+    appendField(container, "Show value", element.props.showValue, { type: "checkbox" }, (value) => { element.props.showValue = value; });
+    appendField(container, "Fill color", element.style.color, { type: "color" }, (value) => { element.style.color = value; });
+    appendField(container, "Track color", element.style.trackColor, { type: "color" }, (value) => { element.style.trackColor = value; });
+    appendField(container, "Font size", element.style.fontSize, { type: "number", min: 6, max: 120 }, (value) => { element.style.fontSize = value; });
+  } else if (element.type === "qr") {
+    appendField(container, "Text / URL", element.props.text, { type: "textarea" }, (value) => { element.props.text = value; });
+    appendField(container, "Module color", element.style.color, { type: "color" }, (value) => { element.style.color = value; });
+    appendField(container, "Background", element.style.bgColor, { type: "color" }, (value) => { element.style.bgColor = value; });
+  } else if (element.type === "shape") {
+    appendField(container, "Shape", element.props.shape, { type: "select", options: [["rect", "Rectangle"], ["circle", "Circle"], ["ellipse", "Ellipse"]] }, (value) => { element.props.shape = value; });
+    colorField();
+    appendField(container, "Radius", element.style.radius, { type: "number", min: 0, max: 50 }, (value) => { element.style.radius = value; });
+    appendField(container, "Outline width", element.style.outlineWidth, { type: "number", min: 0, max: 20 }, (value) => { element.style.outlineWidth = value; });
+    appendField(container, "Outline color", element.style.outlineColor || "#ffffff", { type: "color" }, (value) => { element.style.outlineColor = value; });
   }
 
-  if (["ha-state", "ha-toggle", "script"].includes(element.type) && !S.homeAssistant.configured) {
+  if ((["ha-state", "ha-toggle", "script"].includes(element.type) || (element.type === "gauge" && element.props.sourceKind === "ha")) && !S.homeAssistant.configured) {
     const help = document.createElement("p");
     help.className = "integration-help";
     help.textContent = "Home Assistant is not configured. Add its URL and token on the Settings page to use ha().";

@@ -14,7 +14,7 @@ use yello_server::layout_model::{
     DEFAULT_PAGE_ID,
 };
 use yello_server::server::{apply_navigation, AppState, DeviceSession};
-use yello_server::{default_layout, handle_http_request, DEFAULT_DESIGN_ID};
+use yello_server::{default_design, default_layout, handle_http_request, DEFAULT_DESIGN_ID};
 
 fn static_dir() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -57,14 +57,20 @@ fn two_page_design() -> Value {
 }
 
 #[test]
-fn v1_layout_migrates_to_single_page_design() {
-    let out = validate_design(default_layout()).expect("valid");
+fn v1_layout_is_rejected() {
+    let err = validate_design(default_layout()).unwrap_err();
+    assert!(format!("{err:?}").contains("no longer accepted"), "unexpected: {err:?}");
+}
+
+#[test]
+fn default_design_is_a_valid_single_page_design() {
+    let out = validate_design(default_design()).expect("valid");
     assert_eq!(out["schemaVersion"], 2);
     assert_eq!(out["homePageId"], DEFAULT_PAGE_ID);
     let pages = out["pages"].as_array().unwrap();
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0]["id"], DEFAULT_PAGE_ID);
-    let default_elements = default_layout()["elements"].as_array().unwrap().len();
+    let default_elements = default_design()["pages"][0]["elements"].as_array().unwrap().len();
     assert_eq!(pages[0]["elements"].as_array().unwrap().len(), default_elements);
     assert!(out["sharedElements"].as_array().unwrap().is_empty());
     assert_eq!(design_home_page_id(&out), DEFAULT_PAGE_ID);

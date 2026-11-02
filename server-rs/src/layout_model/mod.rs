@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
-pub const SCHEMA_VERSION: i32 = 1;
-/// Design-level schema (Tier 2): a design contains pages + shared elements.
+/// The design schema: a design document (schemaVersion 2) contains
+/// pages + shared elements. Page bodies carry no version of their own,
+/// and no other document format is accepted.
 pub const DESIGN_SCHEMA_VERSION: i32 = 2;
 pub const MAX_PAGES: usize = 50;
 pub const DEFAULT_PAGE_ID: &str = "main";
@@ -251,6 +252,43 @@ pub fn default_element(element_type: &str, element_id: &str) -> Result<Value, St
                 json!({"entityId": "light.example", "label": "Light", "refreshInterval": 2}),
             );
         }
+        "screen" => {
+            defaults.insert("frame".to_string(), json!({"x": 20, "y": 90, "w": 120, "h": 160}));
+            defaults.insert("style".to_string(), json!({}));
+            defaults.insert("props".to_string(), json!({"designId": "", "pageId": ""}));
+        }
+        "gauge" => {
+            defaults.insert("frame".to_string(), json!({"x": 20, "y": 150, "w": 200, "h": 36}));
+            defaults.insert(
+                "style".to_string(),
+                json!({"color": "#57c785", "trackColor": "#2a2f3a", "fontSize": 14}),
+            );
+            defaults.insert(
+                "props".to_string(),
+                json!({
+                    "sourceKind": "static", "value": 65,
+                    "sourceId": "", "entityId": "sensor.example",
+                    "min": 0, "max": 100, "decimals": 0, "unit": "",
+                    "showValue": true, "refreshInterval": 5
+                }),
+            );
+        }
+        "qr" => {
+            defaults.insert("frame".to_string(), json!({"x": 70, "y": 110, "w": 100, "h": 100}));
+            defaults.insert(
+                "style".to_string(),
+                json!({"color": "#111111", "bgColor": "#ffffff"}),
+            );
+            defaults.insert("props".to_string(), json!({"text": "https://example.com"}));
+        }
+        "shape" => {
+            defaults.insert("frame".to_string(), json!({"x": 80, "y": 130, "w": 80, "h": 60}));
+            defaults.insert(
+                "style".to_string(),
+                json!({"color": "#8e6bc8", "radius": 0, "outlineColor": "", "outlineWidth": 0}),
+            );
+            defaults.insert("props".to_string(), json!({"shape": "rect"}));
+        }
         "script" => {
             defaults.insert("frame".to_string(), json!({"x": 20, "y": 130, "w": 200, "h": 60}));
             defaults.insert(
@@ -301,7 +339,6 @@ pub fn default_layout() -> Value {
     greeting["props"]["text"] = json!("Hello from the server!");
 
     json!({
-        "schemaVersion": SCHEMA_VERSION,
         "name": "Yello screen",
         "profile": "ili9341-240x320",
         "orientation": "portrait",
@@ -312,182 +349,38 @@ pub fn default_layout() -> Value {
     })
 }
 
+/// The canonical default design: a schema-v2 document whose single
+/// "Main" page holds the default layout's elements. New studio files
+/// are seeded with this; designs have no other format.
+pub fn default_design() -> Value {
+    let page = default_layout();
+    let background = page.get("background").cloned().unwrap_or_else(|| json!("#0a0a1e"));
+    json!({
+        "schemaVersion": DESIGN_SCHEMA_VERSION,
+        "name": page.get("name").cloned().unwrap_or_else(|| json!("Yello screen")),
+        "profile": page.get("profile").cloned().unwrap_or_else(|| json!("ili9341-240x320")),
+        "orientation": page.get("orientation").cloned().unwrap_or_else(|| json!("portrait")),
+        "background": background,
+        "idleHomeSeconds": 0,
+        "dataSources": page.get("dataSources").cloned().unwrap_or_else(|| json!([])),
+        "actions": page.get("actions").cloned().unwrap_or_else(|| json!([])),
+        "homePageId": DEFAULT_PAGE_ID,
+        "pages": [{
+            "id": DEFAULT_PAGE_ID,
+            "name": "Main",
+            "background": background,
+            "elements": page.get("elements").cloned().unwrap_or_else(|| json!([]))
+        }],
+        "sharedElements": []
+    })
+}
+
 pub fn layout_dimensions(layout: &Value) -> (u16, u16) {
     if layout.get("orientation").and_then(|v| v.as_str()) == Some("landscape") {
         (LANDSCAPE_WIDTH, LANDSCAPE_HEIGHT)
     } else {
         (DISPLAY_WIDTH, DISPLAY_HEIGHT)
     }
-}
-
-pub fn migrate_layout(mut raw: Value) -> Value {
-    if !raw.is_object() || raw.get("schemaVersion").is_some() {
-        return raw;
-    }
-
-    let mut migrated = json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "name": raw.get("name").and_then(|v| v.as_str()).unwrap_or("Yello screen"),
-        "profile": "ili9341-240x320",
-        "orientation": "portrait",
-        "background": raw.get("background").and_then(|v| v.as_str()).unwrap_or("#0a0a1e"),
-        "dataSources": [],
-        "actions": [],
-        "elements": []
-    });
-
-    let mut source_by_url: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut action_by_url: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-    if let Some(elements) = raw.get_mut("elements").and_then(|v| v.as_array_mut()) {
-        for (index, old) in elements.iter_mut().enumerate() {
-            if !old.is_object() {
-                continue;
-            }
-            let raw_type = old.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let element_type = match raw_type {
-                "time" => "clock",
-                "external" => "external-text",
-                "rect" => "color-block",
-                other => other,
-            };
-
-            let supported = [
-                "text", "clock", "external-text", "color-block", "button",
-                "design-link", "image", "ha-state", "ha-toggle", "script",
-            ];
-            if !supported.contains(&element_type) {
-                continue;
-            }
-
-            let element_id = old
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("element{}", index + 1));
-
-            // Schema-v1 elements carry their data in `frame`/`style`/`props`
-            // objects; legacy layouts use flat top-level keys (x, y, size,
-            // text, …). Without this guard, a modern layout posted without
-            // schemaVersion was rebuilt from defaults — silently turning
-            // every frame, style and prop (e.g. image src URLs) back to
-            // stock values and making the rendered output unrecognisable.
-            let modern_shape = old.get("frame").is_some()
-                || old.get("style").is_some()
-                || old.get("props").is_some();
-            if modern_shape {
-                let mut el = old.clone();
-                if raw_type != element_type {
-                    el["type"] = json!(element_type);
-                }
-                migrated["elements"].as_array_mut().unwrap().push(el);
-                continue;
-            }
-
-            let mut el = match default_element(element_type, &element_id) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            if let Some(name) = old.get("name").and_then(|v| v.as_str()) {
-                el["name"] = json!(name);
-            }
-
-            let size = old
-                .get("size")
-                .and_then(|v| v.as_i64())
-                .unwrap_or_else(|| el["style"]["fontSize"].as_i64().unwrap_or(18)) as i32;
-
-            if ["text", "clock", "external-text"].contains(&element_type) {
-                let width = old.get("w").and_then(|v| v.as_i64()).unwrap_or(DISPLAY_WIDTH as i64) as i32;
-                let height = old
-                    .get("h")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(24.max((size as f64 * 1.45) as i64)) as i32;
-                let center_x = old.get("x").and_then(|v| v.as_i64()).unwrap_or((DISPLAY_WIDTH / 2) as i64) as i32;
-                let center_y = old.get("y").and_then(|v| v.as_i64()).unwrap_or((DISPLAY_HEIGHT / 2) as i64) as i32;
-                el["frame"] = json!({
-                    "x": center_x - width / 2,
-                    "y": center_y - height / 2,
-                    "w": width,
-                    "h": height
-                });
-            } else {
-                let x = old.get("x").and_then(|v| v.as_i64()).unwrap_or_else(|| el["frame"]["x"].as_i64().unwrap_or(0));
-                let y = old.get("y").and_then(|v| v.as_i64()).unwrap_or_else(|| el["frame"]["y"].as_i64().unwrap_or(0));
-                let w = old.get("w").and_then(|v| v.as_i64()).unwrap_or_else(|| el["frame"]["w"].as_i64().unwrap_or(0));
-                let h = old.get("h").and_then(|v| v.as_i64()).unwrap_or_else(|| el["frame"]["h"].as_i64().unwrap_or(0));
-                el["frame"] = json!({"x": x, "y": y, "w": w, "h": h});
-            }
-
-            if let Some(color) = old.get("color").and_then(|v| v.as_str()) {
-                el["style"]["color"] = json!(color);
-            }
-            if el["style"].get("fontSize").is_some() {
-                el["style"]["fontSize"] = json!(size);
-            }
-
-            if element_type == "text" {
-                if let Some(text) = old.get("text").and_then(|v| v.as_str()) {
-                    el["props"]["text"] = json!(text);
-                }
-            } else if element_type == "clock" {
-                if let Some(format) = old.get("format").and_then(|v| v.as_str()) {
-                    el["props"]["format"] = json!(format);
-                }
-            } else if element_type == "external-text" {
-                let url = old.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                if !url.is_empty() {
-                    let source_id = if let Some(id) = source_by_url.get(url) {
-                        id.clone()
-                    } else {
-                        let id = format!("source{}", source_by_url.len() + 1);
-                        source_by_url.insert(url.to_string(), id.clone());
-                        let interval = old.get("interval").and_then(|v| v.as_i64()).unwrap_or(60);
-                        migrated["dataSources"].as_array_mut().unwrap().push(json!({
-                            "id": id,
-                            "name": format!("External source {}", source_by_url.len()),
-                            "type": "http-text",
-                            "url": url,
-                            "interval": interval
-                        }));
-                        id
-                    };
-                    el["props"]["sourceId"] = json!(source_id);
-                }
-            } else if element_type == "button" {
-                if let Some(label) = old.get("label").and_then(|v| v.as_str()) {
-                    el["props"]["label"] = json!(label);
-                }
-                let url = old.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                if !url.is_empty() {
-                    let action_id = if let Some(id) = action_by_url.get(url) {
-                        id.clone()
-                    } else {
-                        let id = format!("action{}", action_by_url.len() + 1);
-                        action_by_url.insert(url.to_string(), id.clone());
-                        migrated["actions"].as_array_mut().unwrap().push(json!({
-                            "id": id,
-                            "name": format!("Button action {}", action_by_url.len()),
-                            "type": "http",
-                            "method": "GET",
-                            "url": url
-                        }));
-                        id
-                    };
-                    el["props"]["actionId"] = json!(action_id);
-                }
-            } else if element_type == "image" {
-                if let Some(src) = old.get("src").and_then(|v| v.as_str()) {
-                    el["props"]["src"] = json!(src);
-                }
-            }
-
-            migrated["elements"].as_array_mut().unwrap().push(el);
-        }
-    }
-
-    migrated
 }
 
 struct Validator {
@@ -571,16 +464,11 @@ impl Validator {
 }
 
 pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
-    let raw = migrate_layout(raw);
     if !raw.is_object() {
         return Err(LayoutValidationError::new("must be an object"));
     }
 
     let mut v = Validator::new();
-
-    if raw.get("schemaVersion").and_then(|x| x.as_i64()) != Some(SCHEMA_VERSION as i64) {
-        v.error("schemaVersion", &format!("must equal {SCHEMA_VERSION}"));
-    }
 
     let name = v.string(raw.get("name"), "name", "Yello screen", 100);
     let profile = v.string(raw.get("profile"), "profile", "ili9341-240x320", 64);
@@ -603,7 +491,6 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
     };
 
     let mut result = json!({
-        "schemaVersion": SCHEMA_VERSION,
         "name": name,
         "profile": profile,
         "orientation": orientation,
@@ -692,6 +579,7 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
     let supported_types = [
         "text", "clock", "external-text", "color-block", "button",
         "design-link", "image", "ha-state", "ha-toggle", "script",
+        "screen", "gauge", "qr", "shape",
     ];
 
     let mut element_ids = HashSet::new();
@@ -775,7 +663,7 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                     style.insert("verticalAlign".to_string(), json!(vertical));
                 }
 
-                if ["color-block", "button", "design-link", "ha-toggle"].contains(&etype.as_str()) {
+                if ["color-block", "button", "design-link", "ha-toggle", "shape"].contains(&etype.as_str()) {
                     let def_rad = def_style.get("radius").and_then(|v| v.as_i64()).unwrap_or(0);
                     let rad = v.integer(style_raw.and_then(|m| m.get("radius")), &format!("{path}.style.radius"), def_rad, 0, 50);
                     style.insert("radius".to_string(), json!(rad));
@@ -785,6 +673,31 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                     let def_off = def_style.get("offColor").and_then(|v| v.as_str()).unwrap_or("#353b48");
                     let off_color = v.color(style_raw.and_then(|m| m.get("offColor")), &format!("{path}.style.offColor"), def_off);
                     style.insert("offColor".to_string(), json!(off_color));
+                }
+
+                if etype == "gauge" {
+                    let def_track = def_style.get("trackColor").and_then(|v| v.as_str()).unwrap_or("#2a2f3a");
+                    let track = v.color(style_raw.and_then(|m| m.get("trackColor")), &format!("{path}.style.trackColor"), def_track);
+                    style.insert("trackColor".to_string(), json!(track));
+                }
+
+                if etype == "qr" {
+                    let def_bg = def_style.get("bgColor").and_then(|v| v.as_str()).unwrap_or("#ffffff");
+                    let bg = v.color(style_raw.and_then(|m| m.get("bgColor")), &format!("{path}.style.bgColor"), def_bg);
+                    style.insert("bgColor".to_string(), json!(bg));
+                }
+
+                if etype == "shape" {
+                    // Outline color may be empty (= no outline).
+                    let raw_oc = style_raw.and_then(|m| m.get("outlineColor")).and_then(|x| x.as_str()).unwrap_or("");
+                    let oc = if raw_oc.is_empty() {
+                        String::new()
+                    } else {
+                        v.color(style_raw.and_then(|m| m.get("outlineColor")), &format!("{path}.style.outlineColor"), "#ffffff")
+                    };
+                    style.insert("outlineColor".to_string(), json!(oc));
+                    let ow = v.integer(style_raw.and_then(|m| m.get("outlineWidth")), &format!("{path}.style.outlineWidth"), 0, 0, 20);
+                    style.insert("outlineWidth".to_string(), json!(ow));
                 }
 
                 let props = match etype.as_str() {
@@ -874,6 +787,63 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                             "code": code, "refreshInterval": refresh_interval, "wrap": wrap
                         })
                     }
+                    "screen" => {
+                        let design_id = v.string(props_raw.and_then(|m| m.get("designId")), &format!("{path}.props.designId"), "", 64);
+                        if !design_id.is_empty() && !design_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                            v.error(&format!("{path}.props.designId"), "must be a design ID or empty (this design)");
+                        }
+                        let page_id = v.string(props_raw.and_then(|m| m.get("pageId")), &format!("{path}.props.pageId"), "", 64);
+                        if !page_id.is_empty() && !page_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                            v.error(&format!("{path}.props.pageId"), "must be a page ID or empty (home page)");
+                        }
+                        json!({"designId": design_id, "pageId": page_id})
+                    }
+                    "gauge" => {
+                        let mut kind = v.string(props_raw.and_then(|m| m.get("sourceKind")), &format!("{path}.props.sourceKind"), "static", 16);
+                        if !["static", "external", "ha"].contains(&kind.as_str()) {
+                            v.error(&format!("{path}.props.sourceKind"), "must be static, external or ha");
+                            kind = "static".to_string();
+                        }
+                        let num = |key: &str, def: f64| -> f64 {
+                            props_raw.and_then(|m| m.get(key)).and_then(|x| x.as_f64()).unwrap_or(def)
+                        };
+                        let value = num("value", 0.0);
+                        let min = num("min", 0.0);
+                        let max = num("max", 100.0);
+                        if max <= min {
+                            v.error(&format!("{path}.props.max"), "must be greater than min");
+                        }
+                        let source_id = v.string(props_raw.and_then(|m| m.get("sourceId")), &format!("{path}.props.sourceId"), "", 64);
+                        if kind == "external" && !source_id.is_empty() && !source_ids.contains(&source_id) {
+                            v.error(&format!("{path}.props.sourceId"), "references an unknown data source");
+                        }
+                        let entity_id = v.string(props_raw.and_then(|m| m.get("entityId")), &format!("{path}.props.entityId"), "sensor.example", 255);
+                        if kind == "ha" && !HA_ENTITY_RE.is_match(&entity_id) {
+                            v.error(&format!("{path}.props.entityId"), "must be a Home Assistant entity ID such as sensor.temperature");
+                        }
+                        let decimals = v.integer(props_raw.and_then(|m| m.get("decimals")), &format!("{path}.props.decimals"), 0, 0, 6);
+                        let unit = v.string(props_raw.and_then(|m| m.get("unit")), &format!("{path}.props.unit"), "", 16);
+                        let show_value = props_raw.and_then(|m| m.get("showValue")).and_then(|x| x.as_bool()).unwrap_or(true);
+                        let refresh_interval = v.integer(props_raw.and_then(|m| m.get("refreshInterval")), &format!("{path}.props.refreshInterval"), 5, 1, 3600);
+                        json!({
+                            "sourceKind": kind, "value": value, "sourceId": source_id,
+                            "entityId": entity_id, "min": min, "max": max,
+                            "decimals": decimals, "unit": unit, "showValue": show_value,
+                            "refreshInterval": refresh_interval
+                        })
+                    }
+                    "qr" => {
+                        let text = v.string(props_raw.and_then(|m| m.get("text")), &format!("{path}.props.text"), "", 1024);
+                        json!({"text": text})
+                    }
+                    "shape" => {
+                        let mut shape = v.string(props_raw.and_then(|m| m.get("shape")), &format!("{path}.props.shape"), "rect", 16);
+                        if !["rect", "circle", "ellipse"].contains(&shape.as_str()) {
+                            v.error(&format!("{path}.props.shape"), "must be rect, circle or ellipse");
+                            shape = "rect".to_string();
+                        }
+                        json!({"shape": shape})
+                    }
                     _ => json!({}),
                 };
 
@@ -903,39 +873,6 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
     } else {
         Ok(result)
     }
-}
-
-/// Wrap a validated schema-v1 layout as a schema-v2 design with a single
-/// page holding the layout's elements. Idempotent for v2 designs.
-pub fn migrate_design_to_v2(layout: Value) -> Value {
-    if layout.get("schemaVersion").and_then(|v| v.as_i64()) == Some(DESIGN_SCHEMA_VERSION as i64)
-        || layout.get("pages").is_some()
-    {
-        return layout;
-    }
-    let background = layout
-        .get("background")
-        .and_then(|v| v.as_str())
-        .unwrap_or("#0a0a1e")
-        .to_string();
-    json!({
-        "schemaVersion": DESIGN_SCHEMA_VERSION,
-        "name": layout.get("name").cloned().unwrap_or_else(|| json!("Yello screen")),
-        "profile": layout.get("profile").cloned().unwrap_or_else(|| json!("ili9341-240x320")),
-        "orientation": layout.get("orientation").cloned().unwrap_or_else(|| json!("portrait")),
-        "background": background,
-        "idleHomeSeconds": 0,
-        "dataSources": layout.get("dataSources").cloned().unwrap_or_else(|| json!([])),
-        "actions": layout.get("actions").cloned().unwrap_or_else(|| json!([])),
-        "homePageId": DEFAULT_PAGE_ID,
-        "pages": [{
-            "id": DEFAULT_PAGE_ID,
-            "name": "Main",
-            "background": background,
-            "elements": layout.get("elements").cloned().unwrap_or_else(|| json!([]))
-        }],
-        "sharedElements": []
-    })
 }
 
 /// Navigation target of a design-link element (Tier 2):
@@ -1019,7 +956,6 @@ pub fn effective_page_layout(design: &Value, page_id: &str) -> Option<Value> {
     }
 
     Some(json!({
-        "schemaVersion": SCHEMA_VERSION,
         "name": page.get("name").cloned().unwrap_or_else(|| design.get("name").cloned().unwrap_or_else(|| json!("Yello screen"))),
         "profile": design.get("profile").cloned().unwrap_or_else(|| json!("ili9341-240x320")),
         "orientation": design.get("orientation").cloned().unwrap_or_else(|| json!("portrait")),
@@ -1030,11 +966,11 @@ pub fn effective_page_layout(design: &Value, page_id: &str) -> Option<Value> {
     }))
 }
 
-/// Validate a design document. Accepts a v1 layout (migrated to a
-/// single-page v2 design) or a v2 design with pages and opt-in shared
-/// elements. Page element validation reuses the v1 layout validator on a
-/// synthetic layout carrying the design's data sources and actions, so
-/// cross-references (sourceId / actionId) check exactly as before.
+/// Validate a schema-v2 design document (pages + opt-in shared
+/// elements). The v1 layout format is not accepted. Page element
+/// validation reuses the page validator on a synthetic layout carrying
+/// the design's data sources and actions, so cross-references
+/// (sourceId / actionId) check exactly as before.
 pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
     if !raw.is_object() {
         return Err(LayoutValidationError::new("must be an object"));
@@ -1042,12 +978,9 @@ pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
     let is_v2 = raw.get("schemaVersion").and_then(|x| x.as_i64()) == Some(DESIGN_SCHEMA_VERSION as i64)
         || raw.get("pages").is_some();
     if !is_v2 {
-        // Migrate, then run the migrated document through the full v2
-        // checks: a legacy layout can still carry v2-only references
-        // (page: link targets, shared-element membership), and those must
-        // be rejected here rather than saved and ignored by devices.
-        let migrated = migrate_design_to_v2(validate_layout(raw)?);
-        return validate_design(migrated);
+        return Err(LayoutValidationError::new(
+            "must be a schema v2 design document (schemaVersion 2 with pages[]); the v1 layout format is no longer accepted",
+        ));
     }
 
     let mut v = Validator::new();
@@ -1057,11 +990,10 @@ pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
         v.error("schemaVersion", &format!("must equal {DESIGN_SCHEMA_VERSION}"));
     }
 
-    // Header + data sources + actions, normalized by the v1 validator.
+    // Header + data sources + actions, normalized by the page validator.
     // Only keys actually present are copied over: a JSON null would fail
     // the v1 string checks, while an absent key takes the default.
     let mut skeleton = json!({
-        "schemaVersion": SCHEMA_VERSION,
         "dataSources": raw.get("dataSources").cloned().unwrap_or_else(|| json!([])),
         "actions": raw.get("actions").cloned().unwrap_or_else(|| json!([])),
         "elements": []
@@ -1113,7 +1045,6 @@ pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
                 let page_name = v.string(raw_page.get("name"), &format!("{path}.name"), "Page", 100);
 
                 let page_skeleton = json!({
-                    "schemaVersion": SCHEMA_VERSION,
                     "name": head["name"],
                     "profile": head["profile"],
                     "orientation": orientation,
@@ -1175,7 +1106,6 @@ pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
         match shared_raw.as_array() {
             Some(shared_arr) => {
                 let shared_skeleton = json!({
-                    "schemaVersion": SCHEMA_VERSION,
                     "name": head["name"],
                     "profile": head["profile"],
                     "orientation": orientation,
@@ -1234,22 +1164,33 @@ pub fn validate_design(raw: Value) -> Result<Value, LayoutValidationError> {
         }
     }
 
-    // ---- Internal design-link targets must point at real pages ----
+    // ---- Internal references must point at real pages: design-link
+    // page: targets, and embedded screens pointing at this design. ----
     let check_targets = |elements: &Value, root: &str, v: &mut Validator| {
         if let Some(arr) = elements.as_array() {
             for (index, el) in arr.iter().enumerate() {
-                if el.get("type").and_then(|t| t.as_str()) != Some("design-link") {
-                    continue;
-                }
-                let target = el
-                    .get("props")
-                    .and_then(|p| p.get("targetDesignId"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                if let NavTarget::Page(pid) = parse_nav_target(target) {
-                    if !page_ids.contains(&pid) {
+                let etype = el.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if etype == "design-link" {
+                    let target = el
+                        .get("props")
+                        .and_then(|p| p.get("targetDesignId"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    if let NavTarget::Page(pid) = parse_nav_target(target) {
+                        if !page_ids.contains(&pid) {
+                            v.error(
+                                &format!("{root}[{index}].props.targetDesignId"),
+                                "references an unknown page in this design",
+                            );
+                        }
+                    }
+                } else if etype == "screen" {
+                    let props = el.get("props").unwrap_or(&Value::Null);
+                    let target_design = props.get("designId").and_then(|t| t.as_str()).unwrap_or("");
+                    let target_page = props.get("pageId").and_then(|t| t.as_str()).unwrap_or("");
+                    if target_design.is_empty() && !target_page.is_empty() && !page_ids.iter().any(|p| p.as_str() == target_page) {
                         v.error(
-                            &format!("{root}[{index}].props.targetDesignId"),
+                            &format!("{root}[{index}].props.pageId"),
                             "references an unknown page in this design",
                         );
                     }
@@ -1319,6 +1260,26 @@ mod tests {
     fn test_default_layout_is_valid() {
         let layout = default_layout();
         let validated = validate_layout(layout).unwrap();
-        assert_eq!(validated["schemaVersion"], SCHEMA_VERSION);
+        // Page bodies carry no schema version; the version lives on the
+        // design document (DESIGN_SCHEMA_VERSION).
+        assert!(validated.get("schemaVersion").is_none());
+    }
+
+    #[test]
+    fn test_default_design_is_valid_v2() {
+        let design = default_design();
+        let validated = validate_design(design).unwrap();
+        assert_eq!(validated["schemaVersion"], DESIGN_SCHEMA_VERSION);
+        assert_eq!(validated["pages"].as_array().unwrap().len(), 1);
+        assert_eq!(validated["homePageId"], DEFAULT_PAGE_ID);
+    }
+
+    #[test]
+    fn test_validate_design_rejects_v1_layout() {
+        let err = validate_design(default_layout()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("no longer accepted"),
+            "unexpected error: {err:?}"
+        );
     }
 }
