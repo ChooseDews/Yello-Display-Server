@@ -594,3 +594,10 @@ esp-web-install-button { display: inline-block; }
   .agent-mount-panel .agent-setup { grid-template-columns: 1fr; }
   .agent-mount-panel .agent-messages { height: 34dvh; }
 }
+
+/* Image asset tools (upload / import / saved picker) in the inspector */
+.image-tools { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 7px; }
+.image-tools-row { display: flex; gap: 7px; }
+.image-tools-row .secondary-button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.image-upload-button { cursor: pointer; }
+.image-picker { width: 100%; }

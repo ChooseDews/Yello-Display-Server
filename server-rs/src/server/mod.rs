@@ -83,6 +83,58 @@ pub async fn write_atomic(path: &Path, content: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Directory holding user-uploaded image assets, next to the studio file.
+fn assets_dir_for(studio_path: &Path) -> PathBuf {
+    studio_path
+        .parent()
+        .map(|p| p.join("assets"))
+        .unwrap_or_else(|| PathBuf::from("assets"))
+}
+
+/// Turn a user-supplied asset name into a safe file stem: lowercase
+/// alphanumerics, dashes and underscores; everything else collapses to a
+/// dash. Returns None when nothing usable remains.
+fn sanitize_asset_name(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// A stored asset file name is only ever a server-generated
+/// "<slug>.png|.jpg" — reject anything else before touching the disk.
+fn valid_asset_file(file: &str) -> bool {
+    !file.is_empty()
+        && !file.contains('/')
+        && !file.contains('\\')
+        && !file.contains("..")
+        && (file.ends_with(".png") || file.ends_with(".jpg"))
+}
+
+fn asset_content_type(file: &str) -> &'static str {
+    if file.ends_with(".png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    }
+}
+
 /// Decode fetched image bytes into a cacheable RGB image. The header is
 /// inspected first so oversized images are rejected before the full
 /// (potentially huge) pixel buffer is allocated — same flow as PIL's
@@ -1000,6 +1052,7 @@ pub fn start_background_tasks(state: Arc<AppState>) {
     // Image fetch loop (Python parity: ensure_images + fetch_image)
     let st_img = state.clone();
     tokio::spawn(async move {
+        let asset_dir = assets_dir_for(&st_img.studio_path);
         let in_flight: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let last_failure: Arc<std::sync::Mutex<HashMap<String, Instant>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -1042,8 +1095,20 @@ pub fn start_background_tasks(state: Arc<AppState>) {
                 let img_state = st_img.clone();
                 let inflight = in_flight.clone();
                 let failures = last_failure.clone();
+                let spawn_asset_dir = asset_dir.clone();
                 tokio::spawn(async move {
                     let result = async {
+                        // Stored uploads are referenced as /assets/<file> and
+                        // load from disk; anything else is a remote URL.
+                        if let Some(file) = url.strip_prefix("/assets/") {
+                            if !valid_asset_file(file) {
+                                return Err("invalid asset path".to_string());
+                            }
+                            let bytes = tokio::fs::read(spawn_asset_dir.join(file))
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            return decode_image_bytes(&bytes);
+                        }
                         let (bytes, _) = client.fetch_bytes(&url, MAX_IMAGE_BYTES).await.map_err(|e| e.to_string())?;
                         decode_image_bytes(&bytes)
                     }.await;
@@ -2044,6 +2109,82 @@ pub async fn handle_http_request(
                 }
             } else {
                 json_response(StatusCode::BAD_REQUEST, &json!({"error": "invalid JSON"}))
+            }
+        }
+        (Method::GET, "/api/assets") => {
+            let dir = assets_dir_for(&state.studio_path);
+            let mut assets = Vec::new();
+            if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let file = entry.file_name().to_string_lossy().to_string();
+                    if !valid_asset_file(&file) {
+                        continue;
+                    }
+                    let bytes = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                    let name = file.rsplit_once('.').map(|(stem, _)| stem.to_string()).unwrap_or(file.clone());
+                    assets.push(json!({"name": name, "file": file, "url": format!("/assets/{file}"), "bytes": bytes}));
+                }
+            }
+            assets.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            json_response(StatusCode::OK, &json!({"assets": assets}))
+        }
+        (Method::POST, "/api/assets") => {
+            let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
+            let parsed: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
+            let name_raw = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let data_b64 = parsed.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            let slug = sanitize_asset_name(name_raw);
+            let decoded = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.decode(data_b64)
+            };
+            match (slug, decoded) {
+                (Some(slug), Ok(bytes)) if !bytes.is_empty() && bytes.len() <= MAX_IMAGE_BYTES => {
+                    // Only PNG and JPEG are accepted; the stored extension
+                    // comes from the sniffed format, never from the client.
+                    let sniffed = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                        .with_guessed_format()
+                        .ok()
+                        .and_then(|r| r.format());
+                    let ext = match sniffed {
+                        Some(image::ImageFormat::Png) => Some("png"),
+                        Some(image::ImageFormat::Jpeg) => Some("jpg"),
+                        _ => None,
+                    };
+                    match ext {
+                        Some(ext) => {
+                            let dims = decode_image_bytes(&bytes)
+                                .map(|img| (img.width(), img.height()))
+                                .unwrap_or((0, 0));
+                            let file = format!("{slug}.{ext}");
+                            let dir = assets_dir_for(&state.studio_path);
+                            let write = async {
+                                tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
+                                tokio::fs::write(dir.join(&file), &bytes).await.map_err(|e| e.to_string())
+                            };
+                            match write.await {
+                                Ok(()) => json_response(StatusCode::OK, &json!({
+                                    "name": slug, "file": file, "url": format!("/assets/{file}"),
+                                    "bytes": bytes.len(), "width": dims.0, "height": dims.1,
+                                })),
+                                Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e})),
+                            }
+                        }
+                        None => json_response(StatusCode::BAD_REQUEST, &json!({"error": "only PNG and JPEG images are supported"})),
+                    }
+                }
+                (None, _) => json_response(StatusCode::BAD_REQUEST, &json!({"error": "a name is required"})),
+                (_, Err(_)) => json_response(StatusCode::BAD_REQUEST, &json!({"error": "image data is not valid base64"})),
+                _ => json_response(StatusCode::BAD_REQUEST, &json!({"error": "image is empty or larger than 2 MB"})),
+            }
+        }
+        (Method::GET, p) | (Method::HEAD, p) if p.starts_with("/assets/") => {
+            let file = p.trim_start_matches("/assets/");
+            if valid_asset_file(file) {
+                let path = assets_dir_for(&state.studio_path).join(file);
+                serve_static_file(&path, asset_content_type(file), req.method() == &Method::HEAD).await
+            } else {
+                json_response(StatusCode::NOT_FOUND, &json!({"error": "not found"}))
             }
         }
         (Method::GET, "/api/status") => {

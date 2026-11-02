@@ -240,6 +240,7 @@ function bindEvents() {
   $("sel-delete").onclick = deleteSelected;
   $("sel-forward").onclick = () => moveLayer(1);
   $("sel-backward").onclick = () => moveLayer(-1);
+  $("sel-attributes").onclick = () => $("toggle-attributes").click();
   $("zoom-out").onclick = () => stepZoom(1 / 1.25);
   $("zoom-in").onclick = () => stepZoom(1.25);
   $("app-modal-cancel").onclick = () => closeAppModal(null);

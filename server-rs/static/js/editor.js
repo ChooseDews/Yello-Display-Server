@@ -12,6 +12,7 @@ import { toast, appConfirm, appPrompt, appForm } from "./dialog.js";
 import { commit, pushHistory, setDocumentState } from "./history.js";
 import { schedulePreview, scheduleScreenPreview, applyZoom, syncCodeEditor } from "./canvas.js";
 import { ensureFlowSoon, renderFlow, drawFlowArrows } from "./flow.js";
+import { appendImageTools } from "./assets.js";
 
 export function selected() {
   return findElement(S.selectedId);
@@ -686,6 +687,7 @@ export function renderInspector() {
   } else if (element.type === "image") {
     appendField(container, "Image URL", element.props.src, { type: "text" }, (value) => { element.props.src = value; });
     appendField(container, "Fit", element.props.fit, { type: "select", options: [["contain", "Contain"], ["cover", "Cover"], ["stretch", "Stretch"]] }, (value) => { element.props.fit = value; });
+    appendImageTools(container, element);
   } else if (element.type === "ha-state") {
     appendHomeAssistantEntityField(container, element.props.entityId, (value) => { element.props.entityId = value; });
     appendField(container, "Attribute", element.props.attribute, { type: "text" }, (value) => { element.props.attribute = value; });
