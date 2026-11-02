@@ -240,6 +240,10 @@ function bindEvents() {
   $("sel-delete").onclick = deleteSelected;
   $("sel-forward").onclick = () => moveLayer(1);
   $("sel-backward").onclick = () => moveLayer(-1);
+  $("sel-lock").onclick = () => {
+    const element = selected();
+    if (element) commit(() => { element.locked = !element.locked; });
+  };
   $("sel-attributes").onclick = () => $("toggle-attributes").click();
   $("zoom-out").onclick = () => stepZoom(1 / 1.25);
   $("zoom-in").onclick = () => stepZoom(1.25);

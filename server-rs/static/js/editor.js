@@ -878,6 +878,17 @@ export function updateSelectionBar() {
   if (!bar) return;
   const show = isNarrowScreen() && Boolean(S.selectedId) && !$("designer-page").classList.contains("hidden");
   bar.classList.toggle("hidden", !show);
+  if (show) {
+    const lockButton = $("sel-lock");
+    const element = selected();
+    if (lockButton && element) {
+      const locked = Boolean(element.locked);
+      lockButton.setAttribute("aria-pressed", String(locked));
+      lockButton.setAttribute("aria-label", locked ? "Unlock element" : "Lock element");
+      lockButton.title = locked ? "Unlock" : "Lock";
+      lockButton.querySelector("use")?.setAttribute("href", locked ? "#i-lock" : "#i-lock-open");
+    }
+  }
 }
 
 export function renderAll() {

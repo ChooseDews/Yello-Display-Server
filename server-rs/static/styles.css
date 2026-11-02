@@ -601,3 +601,4 @@ esp-web-install-button { display: inline-block; }
 .image-tools-row .secondary-button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .image-upload-button { cursor: pointer; }
 .image-picker { width: 100%; }
+.sel-action[aria-pressed="true"] { background: #2b3550; }

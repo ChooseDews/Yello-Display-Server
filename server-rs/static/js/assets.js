@@ -116,7 +116,7 @@ export function appendImageTools(container, element) {
 
   const uploadLabel = document.createElement("label");
   uploadLabel.className = "secondary-button image-upload-button";
-  uploadLabel.innerHTML = `${icon("i-upload")} Upload JPG/PNG`;
+  uploadLabel.innerHTML = `${icon("upload")} Upload JPG/PNG`;
   const fileInput = document.createElement("input");
   fileInput.type = "file";
   fileInput.accept = "image/png,image/jpeg";
@@ -133,7 +133,7 @@ export function appendImageTools(container, element) {
   const importButton = document.createElement("button");
   importButton.type = "button";
   importButton.className = "secondary-button";
-  importButton.innerHTML = `${icon("i-link")} Import link`;
+  importButton.innerHTML = `${icon("link")} Import link`;
   importButton.onclick = async () => {
     const url = String(element.props.src ?? "").trim();
     if (!/^https?:\/\//i.test(url)) {
