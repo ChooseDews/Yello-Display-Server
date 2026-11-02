@@ -9,7 +9,6 @@
 <body>
   <header class="app-header">
     <div class="top-bar">
-      <button id="toggle-blocks" type="button" class="icon-button drawer-toggle" title="Blocks panel" aria-label="Toggle blocks panel" aria-pressed="false">▤</button>
       <a class="brand" href="/designer" data-route="designer">
         <span class="brand-mark">Y</span>
         <div>
@@ -22,7 +21,6 @@
           <span id="device-dot" class="status-dot"></span>
           <span id="device-status">Checking device</span>
         </div>
-        <button id="toggle-attributes" type="button" class="icon-button drawer-toggle" title="Attributes panel" aria-label="Toggle attributes panel" aria-pressed="false">✎</button>
         <button id="undo" class="icon-button" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
         <button id="redo" class="icon-button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
         <button id="save" class="primary-button"><span class="save-icon" aria-hidden="true">💾</span><span class="save-label">Save &amp; apply</span></button>
@@ -90,6 +88,8 @@
 
     <section class="canvas-area">
       <div class="canvas-toolbar">
+        <button id="toggle-blocks" type="button" class="icon-button drawer-toggle" title="Blocks panel" aria-label="Toggle blocks panel" aria-pressed="false">▤</button>
+        <div id="deploy-slot"></div>
         <div class="screen-size"><span>ILI9341</span><strong id="canvas-dimensions">240 × 320</strong></div>
         <div class="view-toggle" role="group" aria-label="Canvas mode">
           <button id="edit-mode" class="active" type="button">Edit</button>
@@ -102,8 +102,12 @@
           <span id="zoom-label">200%</span>
           <button id="zoom-in" aria-label="Zoom in">+</button>
         </div>
+        <button id="toggle-attributes" type="button" class="icon-button drawer-toggle" title="Attributes panel" aria-label="Toggle attributes panel" aria-pressed="false">✎</button>
       </div>
-      <div id="page-strip" class="page-strip" aria-label="Design pages"></div>
+      <div class="page-bar">
+        <div id="page-strip" class="page-strip" aria-label="Design pages"></div>
+        <div id="edit-actions" class="edit-actions"></div>
+      </div>
       <div id="canvas-scroll" class="canvas-scroll">
         <div id="flow-canvas" class="flow-canvas hidden" aria-label="Connected screens flow">
           <svg id="flow-connectors" class="flow-connectors" aria-hidden="true"></svg>
@@ -240,6 +244,7 @@
   <div id="drawer-backdrop" class="drawer-backdrop"></div>
 
   <nav id="mobile-nav" class="mobile-nav" aria-label="Studio navigation">
+    <button type="button" class="mobile-nav-brand" data-route="designer" aria-label="Yello Studio — Designer">Y</button>
     <button type="button" data-route="designer"><span aria-hidden="true">▦</span>Designer</button>
     <button type="button" data-route="devices"><span aria-hidden="true">▭</span>Devices</button>
     <button type="button" data-route="settings"><span aria-hidden="true">⚙</span>Settings</button>

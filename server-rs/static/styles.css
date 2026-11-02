@@ -388,6 +388,9 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 
 /* ---- Mobile: one panel at a time, bottom tab bar ---- */
 .mobile-nav, .drawer-toggle, .drawer-head, .drawer-backdrop, .save-icon, .pa-icon { display: none; }
+.page-bar { display: contents; }
+.edit-actions { display: none; }
+#deploy-slot { display: contents; }
 
 @media (pointer: coarse) {
   .resize-handle { width: 11px; height: 11px; }
@@ -395,7 +398,7 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 
 @media (max-width: 860px) {
   /* Mobile chrome is exactly three bars: top bar, sub-bar, bottom nav. */
-  .app-header { height: auto; flex-direction: column; align-items: stretch; padding: 0; gap: 0; }
+  .app-header { display: none; }
   .top-bar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
   .brand { gap: 8px; }
   .brand-mark { width: 26px; height: 26px; border-radius: 7px; font-size: 14px; }
@@ -446,6 +449,10 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
   }
   .mobile-nav button span { font-size: 14px; line-height: 1; }
   .mobile-nav button.active { background: var(--accent); border-color: #c99f20; color: #191507; font-weight: 700; }
+  .mobile-nav button.mobile-nav-brand {
+    flex: 0 0 42px; justify-content: center; background: var(--accent); border-color: #c99f20;
+    color: #191507; font-weight: 900; font-size: 16px;
+  }
 
   .canvas-area { grid-template-rows: auto auto minmax(0, 1fr) auto; }
   .canvas-toolbar { flex-wrap: nowrap; height: auto; padding: 5px 8px; gap: 6px; overflow-x: auto; scrollbar-width: none; }
@@ -455,7 +462,10 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
   .view-toggle button { min-width: 0; height: 31px; padding: 0 11px; font-size: 11px; }
   .connections-toggle { height: 31px; }
   .zoom-control button { width: 36px; height: 31px; }
-  .page-strip { flex-wrap: nowrap; overflow-x: auto; padding: 4px 8px; }
+  .page-bar { display: flex; align-items: stretch; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .page-strip { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; padding: 4px 8px; border-bottom: 0; }
+  .edit-actions { display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 2px; }
+  .edit-actions .primary-button { padding: 0 10px; }
   .page-tab { padding: 6px 12px; white-space: nowrap; }
   .page-actions { position: sticky; right: 0; padding-left: 6px; background: var(--panel); }
   .page-actions button { padding: 7px 9px; min-width: 36px; }

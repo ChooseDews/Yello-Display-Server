@@ -67,7 +67,32 @@ export function setDrawer(name) {
   if (attributes) attributes.setAttribute("aria-pressed", String(name === "attributes"));
 }
 
+// On phones there is no header at all: the undo/redo/save buttons live
+// in the page bar (next to the page actions) and the screen/design
+// deployment controls live in the canvas toolbar. The same DOM nodes are
+// moved back into the header on wide screens, so ids, bindings, and the
+// designer-actions visibility toggling keep working in both layouts.
+const narrowLayoutQuery = typeof window !== "undefined" && window.matchMedia
+  ? window.matchMedia("(max-width: 860px)")
+  : { matches: false, addEventListener: () => {} };
+export function placeHeaderControls() {
+  const undo = $("undo");
+  const redo = $("redo");
+  const save = $("save");
+  const deployment = document.querySelector(".deployment-controls");
+  if (!undo || !redo || !save || !deployment) return;
+  if (narrowLayoutQuery.matches) {
+    $("edit-actions")?.append(undo, redo, save);
+    $("deploy-slot")?.append(deployment);
+  } else {
+    document.querySelector(".header-actions")?.append(undo, redo, save);
+    document.querySelector(".sub-bar")?.append(deployment);
+  }
+}
+
 function bindEvents() {
+  placeHeaderControls();
+  narrowLayoutQuery.addEventListener("change", placeHeaderControls);
   document.querySelectorAll("[data-copy-target]").forEach((button) => {
     button.onclick = async () => {
       const target = $(button.dataset.copyTarget);
