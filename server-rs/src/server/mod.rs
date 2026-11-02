@@ -1490,7 +1490,7 @@ pub async fn handle_http_request(
     let path = req.uri().path().to_string();
 
     let resp = match (method, path.as_str()) {
-        (Method::GET, "/") | (Method::GET, "/designer") | (Method::GET, "/devices") | (Method::GET, "/designs") | (Method::GET, "/settings") | (Method::GET, "/about") => {
+        (Method::GET, "/") | (Method::GET, "/designer") | (Method::GET, "/devices") | (Method::GET, "/designs") | (Method::GET, "/settings") | (Method::GET, "/about") | (Method::GET, "/agent") => {
             serve_static_file(&state.static_dir.join("index.html"), "text/html", false).await
         }
         (Method::GET, p) | (Method::HEAD, p) if p.starts_with("/static/") => {

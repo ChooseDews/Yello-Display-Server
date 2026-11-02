@@ -11,16 +11,17 @@ import {
 } from "./canvas.js";
 import { rebuildFlow } from "./flow.js";
 import { setDocumentState } from "./history.js";
+import { initAgentPage } from "./agent.js";
 
 export function pageFromPath() {
   const name = window.location.pathname.replace(/^\//, "");
-  return ["designer", "devices", "designs", "settings", "about"].includes(name) ? name : "designer";
+  return ["designer", "devices", "designs", "settings", "about", "agent"].includes(name) ? name : "designer";
 }
 
 export function showPage(page, push = false) {
   S.currentPage = page;
   document.body.classList.toggle("route-designer", page === "designer");
-  for (const name of ["designer", "devices", "designs", "settings", "about"]) {
+  for (const name of ["designer", "devices", "designs", "settings", "about", "agent"]) {
     $(`${name}-page`).classList.toggle("hidden", name !== page);
   }
   document.querySelectorAll(".designer-actions").forEach((el) => el.classList.toggle("hidden", page !== "designer"));
@@ -32,6 +33,7 @@ export function showPage(page, push = false) {
   if (page === "designs") renderDesignPage();
   if (page === "settings") loadHomeAssistantSettings().catch((error) => toast(error.message, true));
   if (page === "about") renderAboutPage();
+  if (page === "agent") initAgentPage();
 }
 
 // The About page: project links plus the ESP32 web flasher. The firmware
