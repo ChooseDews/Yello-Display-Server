@@ -326,6 +326,13 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 .settings-actions .subtle { margin-left: 5px; }
 .script-editor { min-height: 190px !important; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.45; tab-size: 4; }
 
+.about-links a { text-decoration: none; }
+.oauth-block { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 4px; }
+.flash-notes { margin: 14px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.flash-notes strong { color: var(--text); }
+#flash-region { min-height: 38px; display: flex; align-items: center; }
+esp-web-install-button { display: inline-block; }
+
 @media (max-width: 1050px) {
   .workspace { grid-template-columns: 210px minmax(380px, 1fr) 280px; }
   .deployment-controls label { display: none; }

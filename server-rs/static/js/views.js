@@ -14,13 +14,13 @@ import { setDocumentState } from "./history.js";
 
 export function pageFromPath() {
   const name = window.location.pathname.replace(/^\//, "");
-  return ["designer", "devices", "designs", "settings"].includes(name) ? name : "designer";
+  return ["designer", "devices", "designs", "settings", "about"].includes(name) ? name : "designer";
 }
 
 export function showPage(page, push = false) {
   S.currentPage = page;
   document.body.classList.toggle("route-designer", page === "designer");
-  for (const name of ["designer", "devices", "designs", "settings"]) {
+  for (const name of ["designer", "devices", "designs", "settings", "about"]) {
     $(`${name}-page`).classList.toggle("hidden", name !== page);
   }
   document.querySelectorAll(".designer-actions").forEach((el) => el.classList.toggle("hidden", page !== "designer"));
@@ -31,6 +31,71 @@ export function showPage(page, push = false) {
   if (page === "devices") renderDevicePage();
   if (page === "designs") renderDesignPage();
   if (page === "settings") loadHomeAssistantSettings().catch((error) => toast(error.message, true));
+  if (page === "about") renderAboutPage();
+}
+
+// The About page: project links plus the ESP32 web flasher. The firmware
+// binaries and manifest.json are bundled into the server image by CI (from
+// the repo's rolling firmware-latest release); when they are absent the
+// flasher card says so instead of offering a dead button. The flashing
+// itself is ESP Web Tools (Web Serial), loaded from its CDN on first use.
+let aboutProbed = false;
+export async function renderAboutPage() {
+  try {
+    const status = await (await fetch("/api/status")).json();
+    $("about-status").textContent =
+      `A visual designer, live preview, and agent (MCP) access for 240 × 320 ESP32 touch displays. ` +
+      `This server holds ${status.designsCount} design(s), knows ${status.knownScreens} screen(s), and has ${status.connectedScreens} connected right now.`;
+  } catch { /* the static blurb stays */ }
+  if (aboutProbed) return;
+  aboutProbed = true;
+  const region = $("flash-region");
+  const badge = $("flash-state");
+  let manifest = null;
+  try {
+    const response = await fetch("/static/firmware/manifest.json", { cache: "no-store" });
+    if (response.ok) manifest = await response.json();
+  } catch { /* treated as not bundled */ }
+  if (!manifest?.builds?.length) {
+    badge.textContent = "Not bundled";
+    region.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "form-help";
+    note.textContent = "This server image does not have a firmware build bundled yet. Firmware is attached automatically once the repo's firmware-latest release exists and a new server image is built; until then, flash from the release page with esptool.";
+    region.append(note);
+    return;
+  }
+  badge.textContent = "Firmware ready";
+  const script = document.createElement("script");
+  script.type = "module";
+  script.src = "/static/vendor/esp-web-tools/dist/web/install-button.js";
+  script.addEventListener("error", () => {
+    badge.textContent = "Flasher unavailable";
+    region.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "form-help";
+    note.textContent = "The ESP Web Tools script could not be loaded from this server. You can still flash the same binaries from the firmware-latest release with esptool.";
+    region.append(note);
+  });
+  document.head.append(script);
+  region.replaceChildren();
+  const install = document.createElement("esp-web-install-button");
+  install.setAttribute("manifest", "/static/firmware/manifest.json");
+  const activate = document.createElement("button");
+  activate.slot = "activate";
+  activate.className = "primary-button";
+  activate.type = "button";
+  activate.textContent = "Connect & install firmware";
+  const unsupported = document.createElement("span");
+  unsupported.slot = "unsupported";
+  unsupported.className = "form-help";
+  unsupported.textContent = "This browser cannot flash over USB: Web Serial needs Chrome or Edge on a computer.";
+  const notAllowed = document.createElement("span");
+  notAllowed.slot = "not-allowed";
+  notAllowed.className = "form-help";
+  notAllowed.textContent = "Browser flashing needs a secure context (HTTPS or localhost).";
+  install.append(activate, unsupported, notAllowed);
+  region.append(install);
 }
 
 export function renderStudioControls() {
@@ -370,7 +435,58 @@ export function renderDesignPage() {
   }
 }
 
+// Returning from Home Assistant's OAuth approval lands back on /settings
+// with ?code=. The HA base URL and client_id (this origin) were stashed in
+// sessionStorage before leaving, because the settings form reloads empty.
+async function completeHomeAssistantOAuth() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code");
+  if (!code) return;
+  history.replaceState({}, "", "/settings");
+  let stash = {};
+  try {
+    stash = JSON.parse(sessionStorage.getItem("yello-ha-oauth") || "{}");
+    sessionStorage.removeItem("yello-ha-oauth");
+  } catch { /* fall through with form values */ }
+  const url = stash.url || $("ha-url").value.trim();
+  const clientId = stash.clientId || window.location.origin;
+  $("ha-settings-result").textContent = "Completing Home Assistant sign-in…";
+  try {
+    const response = await fetch("/api/settings/home-assistant/oauth/exchange", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, code, clientId }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Sign-in exchange failed");
+    S.homeAssistant = await (await fetch("/api/integrations/home-assistant")).json();
+    renderHomeAssistantOptions();
+    toast(result.connected
+      ? `Home Assistant connected · ${result.entityCount} entities found`
+      : "Home Assistant signed in, but the connection test failed", !result.connected);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+export function startHomeAssistantOAuth() {
+  const url = $("ha-url").value.trim().replace(/\/+$/, "");
+  if (!url) {
+    toast("Enter your Home Assistant URL first, then sign in.", true);
+    $("ha-url").focus();
+    return;
+  }
+  $("ha-url").value = url;
+  const clientId = window.location.origin;
+  try {
+    sessionStorage.setItem("yello-ha-oauth", JSON.stringify({ url, clientId }));
+  } catch { /* the exchange falls back to the saved settings URL */ }
+  const authorize = `${url}/auth/authorize?client_id=${encodeURIComponent(clientId)}` +
+    `&redirect_uri=${encodeURIComponent(clientId + "/settings")}&response_type=code`;
+  window.location.assign(authorize);
+}
+
 export async function loadHomeAssistantSettings() {
+  await completeHomeAssistantOAuth();
   const response = await fetch("/api/settings/home-assistant");
   if (!response.ok) throw new Error("Could not load Home Assistant settings");
   S.homeAssistantSettings = await response.json();
@@ -378,9 +494,14 @@ export async function loadHomeAssistantSettings() {
   $("ha-token").value = "";
   $("ha-token").placeholder = S.homeAssistantSettings.tokenConfigured ? "Saved — leave blank to keep it" : "Paste a long-lived access token";
   const badge = $("ha-settings-state");
+  const method = S.homeAssistantSettings.authMethod;
   badge.className = `integration-badge${S.homeAssistantSettings.configured ? " connected" : ""}`;
-  badge.textContent = S.homeAssistantSettings.configured ? "Configured" : "Not configured";
-  $("ha-settings-result").textContent = S.homeAssistantSettings.tokenConfigured ? "A private token is stored." : "";
+  badge.textContent = !S.homeAssistantSettings.configured
+    ? "Not configured"
+    : method === "oauth" ? "Connected · OAuth" : "Configured";
+  $("ha-settings-result").textContent = S.homeAssistantSettings.tokenConfigured
+    ? "A private token is stored."
+    : method === "oauth" ? "Signed in with Home Assistant (OAuth) — no token is stored." : "";
 }
 
 export async function saveHomeAssistantSettings(clear = false) {

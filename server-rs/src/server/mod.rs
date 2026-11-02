@@ -269,27 +269,48 @@ impl AppState {
             if let Ok(val) = serde_json::from_str::<Value>(&content) {
                 if let Some(ha) = val.get("homeAssistant") {
                     let url = ha.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let token = ha.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                    let refresh = ha.get("refreshToken").and_then(|v| v.as_str()).unwrap_or("");
+                    let client_id = ha.get("clientId").and_then(|v| v.as_str()).unwrap_or("");
                     let mut client = self.ha_client.write().await;
-                    *client = HaClient::new(url, token);
+                    if !refresh.is_empty() {
+                        *client = HaClient::new_oauth(url, refresh, client_id);
+                    } else {
+                        let token = ha.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                        *client = HaClient::new(url, token);
+                    }
                 }
             }
         }
     }
 
-    pub async fn save_settings(&self, url: &str, token: &str) -> Result<(), String> {
-        let val = json!({
-            "schemaVersion": 1,
-            "homeAssistant": {
-                "url": url,
-                "token": token
-            }
-        });
+    async fn store_ha_client(&self, ha: Value, client: HaClient) -> Result<(), String> {
+        let val = json!({ "schemaVersion": 1, "homeAssistant": ha });
         let content = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
         write_atomic(&self.secrets_path, content.as_bytes()).await?;
-        let mut client = self.ha_client.write().await;
-        *client = HaClient::new(url, token);
+        let mut slot = self.ha_client.write().await;
+        *slot = client;
         Ok(())
+    }
+
+    pub async fn save_settings(&self, url: &str, token: &str) -> Result<(), String> {
+        self.store_ha_client(
+            json!({ "url": url, "token": token, "authMethod": "token" }),
+            HaClient::new(url, token),
+        )
+        .await
+    }
+
+    pub async fn save_oauth_settings(&self, url: &str, refresh_token: &str, client_id: &str) -> Result<(), String> {
+        self.store_ha_client(
+            json!({ "url": url, "token": "", "authMethod": "oauth", "refreshToken": refresh_token, "clientId": client_id }),
+            HaClient::new_oauth(url, refresh_token, client_id),
+        )
+        .await
+    }
+
+    pub async fn clear_ha_settings(&self) -> Result<(), String> {
+        self.store_ha_client(json!({ "url": "", "token": "" }), HaClient::new("", ""))
+            .await
     }
 
     pub async fn load_studio_file(&self) {
@@ -1469,10 +1490,10 @@ pub async fn handle_http_request(
     let path = req.uri().path().to_string();
 
     let resp = match (method, path.as_str()) {
-        (Method::GET, "/") | (Method::GET, "/designer") | (Method::GET, "/devices") | (Method::GET, "/designs") | (Method::GET, "/settings") => {
-            serve_static_file(&state.static_dir.join("index.html"), "text/html").await
+        (Method::GET, "/") | (Method::GET, "/designer") | (Method::GET, "/devices") | (Method::GET, "/designs") | (Method::GET, "/settings") | (Method::GET, "/about") => {
+            serve_static_file(&state.static_dir.join("index.html"), "text/html", false).await
         }
-        (Method::GET, p) if p.starts_with("/static/") => {
+        (Method::GET, p) | (Method::HEAD, p) if p.starts_with("/static/") => {
             let rel = p.trim_start_matches("/static/");
             let file_path = state.static_dir.join(rel);
             let content_type = if rel.ends_with(".js") {
@@ -1486,7 +1507,7 @@ pub async fn handle_http_request(
             } else {
                 "application/octet-stream"
             };
-            serve_static_file(&file_path, content_type).await
+            serve_static_file(&file_path, content_type, req.method() == &Method::HEAD).await
         }
         (Method::POST, "/mcp") => {
             mcp::handle_mcp_request(state.clone(), req).await
@@ -1928,8 +1949,36 @@ pub async fn handle_http_request(
             let ha = state.ha_client.read().await;
             json_response(StatusCode::OK, &json!({
                 "configured": ha.configured(),
-                "url": ha.configured()
+                "url": ha.url(),
+                "tokenConfigured": ha.auth_method() == Some("token"),
+                "authMethod": ha.auth_method(),
             }))
+        }
+        (Method::POST, "/api/settings/home-assistant/oauth/exchange") => {
+            let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
+            let raw = serde_json::from_slice::<Value>(&body_bytes).unwrap_or_else(|_| json!({}));
+            let url = raw.get("url").and_then(|v| v.as_str()).unwrap_or("").trim().trim_end_matches('/');
+            let code = raw.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            let client_id = raw.get("clientId").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() || code.is_empty() || client_id.is_empty() {
+                json_response(StatusCode::BAD_REQUEST, &json!({"error": "url, code, and clientId are required"}))
+            } else {
+                match HaClient::exchange_code(url, code, client_id).await {
+                    Ok((refresh_token, access_token, expires_in)) => {
+                        if let Err(e) = state.save_oauth_settings(url, &refresh_token, client_id).await {
+                            json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e}))
+                        } else {
+                            let client = state.ha_client.read().await.clone();
+                            client.prime_access(&access_token, expires_in).await;
+                            match client.list_states().await {
+                                Ok(states) => json_response(StatusCode::OK, &json!({"status": "ok", "connected": true, "entityCount": states.len()})),
+                                Err(e) => json_response(StatusCode::OK, &json!({"status": "ok", "connected": false, "connectionError": e.to_string()})),
+                            }
+                        }
+                    }
+                    Err(e) => json_response(StatusCode::BAD_GATEWAY, &json!({"error": e.to_string()})),
+                }
+            }
         }
         (Method::GET, "/api/integrations/home-assistant") => {
             let ha = state.ha_client.read().await;
@@ -1961,12 +2010,37 @@ pub async fn handle_http_request(
         (Method::PUT, "/api/settings/home-assistant") => {
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
             if let Ok(raw) = serde_json::from_slice::<Value>(&body_bytes) {
-                let url = raw.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let token = raw.get("token").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = state.save_settings(url, token).await {
-                    json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e}))
+                if raw.get("clearToken").and_then(|v| v.as_bool()) == Some(true) {
+                    match state.clear_ha_settings().await {
+                        Ok(()) => json_response(StatusCode::OK, &json!({"status": "ok", "connected": false})),
+                        Err(e) => json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e})),
+                    }
                 } else {
-                    json_response(StatusCode::OK, &json!({"status": "ok"}))
+                    let url = raw.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    let provided = raw.get("token").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    // A blank token field means "keep the stored token": the
+                    // browser never receives it back, so it cannot resend it.
+                    let current = state.ha_client.read().await.clone();
+                    let token = if !provided.is_empty() {
+                        provided.to_string()
+                    } else if current.auth_method() == Some("token") {
+                        current.token_for_save()
+                    } else {
+                        String::new()
+                    };
+                    if let Err(e) = state.save_settings(url, &token).await {
+                        json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e}))
+                    } else {
+                        let client = state.ha_client.read().await.clone();
+                        if !client.configured() {
+                            json_response(StatusCode::OK, &json!({"status": "ok", "connected": false, "connectionError": "no token stored"}))
+                        } else {
+                            match client.list_states().await {
+                                Ok(states) => json_response(StatusCode::OK, &json!({"status": "ok", "connected": true, "entityCount": states.len()})),
+                                Err(e) => json_response(StatusCode::OK, &json!({"status": "ok", "connected": false, "connectionError": e.to_string()})),
+                            }
+                        }
+                    }
                 }
             } else {
                 json_response(StatusCode::BAD_REQUEST, &json!({"error": "invalid JSON"}))
@@ -2021,7 +2095,7 @@ fn png_response(img: &RgbImage) -> Response<Body> {
         .unwrap()
 }
 
-async fn serve_static_file(path: &Path, content_type: &str) -> Response<Body> {
+async fn serve_static_file(path: &Path, content_type: &str, head_only: bool) -> Response<Body> {
     // Everything is served no-cache: the Studio is LAN-served and its files
     // are small, and a cached JS module or stylesheet from before a deploy
     // otherwise mixes with the fresh HTML shell and breaks the page (the
@@ -2034,7 +2108,8 @@ async fn serve_static_file(path: &Path, content_type: &str) -> Response<Body> {
             .status(StatusCode::OK)
             .header("Content-Type", content_type)
             .header("Cache-Control", cache_control)
-            .body(Body::from(data))
+            .header("Content-Length", data.len())
+            .body(if head_only { Body::empty() } else { Body::from(data) })
             .unwrap(),
         Err(_) => Response::builder()
             .status(StatusCode::NOT_FOUND)

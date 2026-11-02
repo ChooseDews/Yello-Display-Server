@@ -47,3 +47,8 @@ bench/results/
 # Firmware binaries are downloaded by CI into the image build context;
 # they must never be committed.
 server-rs/static/firmware/
+
+# The vendored ESP Web Tools bundle ships under a dist/ directory; the
+# Python dist/ rule above would otherwise swallow it.
+!server-rs/static/vendor/esp-web-tools/dist/
+!server-rs/static/vendor/esp-web-tools/dist/**

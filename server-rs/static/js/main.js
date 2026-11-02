@@ -15,7 +15,7 @@ import {
 import { setShowConnections, drawFlowArrows } from "./flow.js";
 import {
   pageFromPath, showPage, renderStudioControls, renderHomeAssistantOptions, renderDesignPage,
-  selectScreen, loadDesign, assignDesign, createDesign, saveLayout, saveHomeAssistantSettings, updateStatus,
+  selectScreen, loadDesign, assignDesign, createDesign, saveLayout, saveHomeAssistantSettings, startHomeAssistantOAuth, updateStatus,
 } from "./views.js?v=3";
 
 function handleKeyboard(event) {
@@ -233,6 +233,7 @@ function bindEvents() {
     });
     if (confirmed) saveHomeAssistantSettings(true);
   };
+  $("ha-oauth").onclick = () => startHomeAssistantOAuth();
   $("duplicate").onclick = duplicateSelected;
   $("zoom-out").onclick = () => stepZoom(1 / 1.25);
   $("zoom-in").onclick = () => stepZoom(1.25);

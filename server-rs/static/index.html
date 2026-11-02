@@ -32,6 +32,7 @@
         <a href="/devices" data-route="devices">Devices</a>
         <a href="/designs" data-route="designs">Screen designs</a>
         <a href="/settings" data-route="settings">Settings</a>
+        <a href="/about" data-route="about">About</a>
       </nav>
       <div class="deployment-controls designer-actions">
         <label>Screen<select id="screen-select" aria-label="Physical screen"></select></label>
@@ -218,6 +219,12 @@
           <span id="ha-settings-result" class="subtle"></span>
         </div>
       </form>
+      <div class="oauth-block">
+        <p class="form-help"><strong>Or sign in with Home Assistant instead.</strong> OAuth sends you to your Home Assistant to approve access — no token to paste. The server keeps a refresh token and renews access itself. Saving a token disconnects an OAuth sign-in, and the other way around.</p>
+        <div class="settings-actions">
+          <button id="ha-oauth" type="button" class="assign-button">Sign in with Home Assistant</button>
+        </div>
+      </div>
     </section>
 
     <section class="settings-card">
@@ -238,6 +245,56 @@
           <button type="button" class="assign-button" data-copy-target="mcp-endpoint">Copy endpoint</button>
         </div>
       </div>
+    </section>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo">Y</div>
+        <div><h2>About Yello Studio</h2><p>Version information, project links, and the ESP32 firmware flasher live on the About page.</p></div>
+      </div>
+      <div class="settings-actions">
+        <a class="assign-button" href="/about" data-route="about">Open the About page</a>
+      </div>
+    </section>
+  </main>
+
+  <main id="about-page" class="management-page hidden">
+    <div class="page-heading">
+      <div><span class="eyebrow">Yello Studio</span><h1>About</h1><p>Design software for the Yello ESP32 displays, and the firmware that runs on them.</p></div>
+    </div>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo">Y</div>
+        <div><h2>Yello Studio</h2><p id="about-status">A visual designer, live preview, and agent (MCP) access for 240 × 320 ESP32 touch displays.</p></div>
+      </div>
+      <p class="form-help">The project is open source: the Studio server, the ESP32 firmware, and the design format all live in the same repository.</p>
+      <div class="settings-actions about-links">
+        <a class="primary-button" href="https://github.com/ChooseDews/Yello-Display-Server" target="_blank" rel="noopener">GitHub repository</a>
+        <a class="assign-button" href="https://github.com/ChooseDews/Yello-Display-Server/releases" target="_blank" rel="noopener">Releases</a>
+        <a class="assign-button" href="https://github.com/ChooseDews/Yello-Display-Server/issues" target="_blank" rel="noopener">Issues</a>
+      </div>
+    </section>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo">⬢</div>
+        <div><h2>Flash the Yello firmware</h2><p>Write the latest firmware build to an ESP32 over USB, straight from this page.</p></div>
+        <span id="flash-state" class="integration-badge">Checking…</span>
+      </div>
+      <div id="flash-region">
+        <p class="form-help">Checking whether this server has a firmware build bundled…</p>
+      </div>
+      <ul class="flash-notes">
+        <li>Use <strong>Chrome or Edge on a computer</strong> — browser flashing needs Web Serial, which Safari and iOS do not support.</li>
+        <li>Plug the display in with a USB data cable, click Connect, and pick the serial port (usually a CH340 or CP210x device).</li>
+        <li>If the flash does not start, hold the display's <strong>BOOT</strong> button while it begins.</li>
+        <li>Installing asks before erasing; a full erase also clears the Wi-Fi settings the device saved for itself.</li>
+        <li>Prefer the command line? The same binaries are on the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a> for esptool.</li>
+      </ul>
+    </section>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div><h2>Under the hood</h2><p>A single Rust server renders designs to RGB565 and streams them to the ESP32, which stays a dumb terminal: it draws what it is sent and reports touches back.</p></div>
+      </div>
+      <p class="form-help">Studio and MCP server in Rust · ESP32 firmware in C on ESP-IDF · browser flashing by ESP Web Tools. Built by John Dews-Flick.</p>
     </section>
   </main>
 
