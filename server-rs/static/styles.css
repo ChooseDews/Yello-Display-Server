@@ -121,7 +121,11 @@ button:not(:disabled):hover { border-color: #596275; background: #242a36; }
 .layer-row button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 3px; border-radius: 4px; }
 .layer-row button:hover { color: var(--text); background: #303644; }
 
-.canvas-area { min-width: 0; display: grid; grid-template-rows: 48px 1fr 34px; background: #101219; }
+/* Four rows: toolbar / page strip / canvas scroll (or code pane) / footer.
+   The page bar is display:contents on desktop, so the page strip is a
+   direct grid item here — with only three rows it took the 1fr row and
+   squeezed the canvas into the 34px footer row. */
+.canvas-area { min-width: 0; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 34px; background: #101219; }
 .canvas-toolbar, .canvas-footer { display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); }
 .screen-size { display: flex; align-items: baseline; gap: 9px; }
 .screen-size span { color: var(--muted); font-size: 11px; }
