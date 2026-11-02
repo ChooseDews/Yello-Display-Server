@@ -43,3 +43,7 @@ server-rs/target/
 
 # Benchmark outputs
 bench/results/
+
+# Firmware binaries are downloaded by CI into the image build context;
+# they must never be committed.
+server-rs/static/firmware/

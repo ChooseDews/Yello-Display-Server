@@ -16,6 +16,10 @@ jobs:
 
   firmware:
     runs-on: ubuntu-latest
+    # Publishing the rolling firmware release needs write access; the rest
+    # of the workflow stays read-only.
+    permissions:
+      contents: write
     container: espressif/idf:release-v5.5
     steps:
       - uses: actions/checkout@v4
@@ -35,3 +39,49 @@ jobs:
         with:
           name: yello-device-firmware
           path: firmware-artifacts
+      # A rolling release the Docker workflow bundles into the server image
+      # for the About page's web flasher (ESP Web Tools manifest + bins).
+      # Done with python3 + the REST API because the ESP-IDF container has
+      # no gh CLI; python3 is guaranteed (ESP-IDF itself runs on it).
+      - name: Publish rolling firmware release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PYEOF'
+          import glob, json, os, urllib.error, urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          api = "https://api.github.com/repos/" + os.environ["GITHUB_REPOSITORY"]
+
+          def call(method, url, payload=None, raw=None):
+              data = raw if raw is not None else (json.dumps(payload).encode() if payload is not None else None)
+              request = urllib.request.Request(url, method=method, data=data)
+              request.add_header("Authorization", "Bearer " + token)
+              request.add_header("Accept", "application/vnd.github+json")
+              if raw is not None:
+                  request.add_header("Content-Type", "application/octet-stream")
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      body = response.read()
+                      return json.loads(body) if body else {}
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return None
+                  raise
+
+          release = call("GET", api + "/releases/tags/firmware-latest")
+          if release is None:
+              release = call("POST", api + "/releases", {
+                  "tag_name": "firmware-latest",
+                  "name": "Yello firmware (latest main build)",
+                  "body": "Rolling ESP32 firmware build from the latest main commit. The same binaries are bundled into the server image for the web flasher on its About page.",
+              })
+          for asset in release.get("assets", []):
+              call("DELETE", api + "/releases/assets/" + str(asset["id"]))
+          upload_base = release["upload_url"].split("{")[0]
+          for path in sorted(glob.glob("firmware-artifacts/*")):
+              with open(path, "rb") as handle:
+                  call("POST", upload_base + "?name=" + os.path.basename(path), raw=handle.read())
+              print("uploaded", os.path.basename(path))
+          PYEOF
