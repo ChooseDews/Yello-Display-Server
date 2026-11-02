@@ -6,7 +6,7 @@
 // JSON editor uses, save_design is the Studio's own saveLayout().
 
 import { $ } from "./util.js";
-import { S, activePageIdFor, homePageIdOf, pageOf } from "./state.js";
+import { S, activePageIdFor, homePageIdOf, pageOf, setActivePage } from "./state.js";
 import { fetchJson, postLayout } from "./api.js";
 import { pushHistory } from "./history.js";
 import { renderAll } from "./editor.js";
@@ -17,6 +17,7 @@ import { saveChat, listChats, getChat, deleteChat } from "./chatstore.js";
 
 const KEY_STORAGE = "yello-openrouter-key";
 const MODEL_STORAGE = "yello-openrouter-model";
+const REASONING_STORAGE = "yello-openrouter-reasoning";
 /** Which conversation is "current" across reloads: a chat id, or "new"
  *  after Clear (a fresh conversation must stay fresh after a reload
  *  instead of resurrecting the previous chat). */
@@ -161,12 +162,14 @@ Values and variables:
 - Numbers (floats), strings ("..." or '...'), and the booleans True / False. Assign with name = expression; there are no declarations and no lists/dicts/functions of your own.
 - width and height are preset to the element's frame size in px — lay out relative to them, never hardcode a page size.
 - Operators: + - * / % ** and comparisons == != < <= > >=, plus and / or / not. + between two strings concatenates them; any other arithmetic on strings is an error. Division is float division.
-- f-strings: f"Temp {value:.1f}" — {expr} inserts a value, {expr:.Nf} formats with N decimals, {expr:.N%} formats as a percentage (value * 100 with N decimals and a % sign). In design JSON the code is a JSON string: use double quotes for f-strings and single quotes inside them.
+- "in" is a substring test between two strings: if "heat" in state:. Conditional expressions: value_a if cond else value_b (value_a is evaluated first — keep it a plain value, no drawing calls).
+- f-strings: f"Temp {value:.1f}" — {expr} inserts a value, {expr:.Nf} formats with N decimals, {expr:.N%} formats as a percentage (value * 100 with N decimals and a % sign), {expr:02d} zero-pads an integer to width 2 (clocks, timers; {expr:3d} space-pads). In design JSON the code is a JSON string: use double quotes for f-strings and single quotes inside them.
 
 Statements:
 - One statement per line; blocks are indented (spaces) after a line ending with ':'.
-- if cond: / else: — there is NO elif; nest an if inside the else block instead.
-- for x in range(n), range(a, b), or range(a, b, step): — the only loop form; the body is the indented block.
+- if cond: / elif cond: / else: chains — as many elif branches as needed.
+- for x in range(n), range(a, b), or range(a, b, step): and while cond: — both loop forms are capped at 100 iterations per run; break and continue work in either.
+- Augmented assignment: x += expr, x -= expr, x *= expr, x /= expr (+= on two strings concatenates).
 - # starts a comment to end of line.
 
 Output — exactly one of two modes per script:
@@ -177,7 +180,12 @@ Built-in functions:
 - ha("sensor.x") -> the entity's state (string, or number when the state is numeric). ha("sensor.x", "attribute") -> an attribute value. Missing or errored entities return the string "unavailable"; a missing attribute returns "unknown" — always guard numeric use: number(ha("sensor.x"), fallback).
 - now("%H:%M") -> the local time formatted with strftime codes (default "%H:%M").
 - number(x, default = 0) -> x as a number, or default when x is not numeric.
-- clamp(x, lo, hi); min(a, b, ...); max(a, b, ...); abs(x); round(x) or round(x, digits); sqrt(x); sin(x), cos(x), tan(x) (radians).
+- source("weather") -> the current text of an http-text data source by id (the same values external-text elements display); "" when the source is missing or has not fetched yet.
+- jq(json_text, ".current.temp_c") -> runs a jq program over JSON text (same jq syntax as the jq_design tool) and returns the result: a single scalar output comes back as a number / string / bool; objects, arrays and multi-output programs come back as JSON text (feed it back into jq() to dig deeper). Unparsable JSON returns None — guard with == None. A malformed jq program is a script error.
+- len(s) -> string length in characters. str(x), int(x) (truncates toward zero), float(x), bool(x) -> conversions.
+- clamp(x, lo, hi); min(a, b, ...); max(a, b, ...); abs(x); round(x) or round(x, digits); floor(x); ceil(x); pow(x, y); sqrt(x); sin(x), cos(x), tan(x) (radians).
+- lerp(a, b, t) -> a + (b - a) * t. map_range(x, in_min, in_max, out_min, out_max) -> x linearly rescaled from one range to another (e.g. a sensor range to a bar width).
+- upper(s); lower(s) -> case-folded copies. rgb(r, g, b) -> a "#rrggbb" color from 0-255 channels (clamped), for computed colors.
 - text(s) -> set the text-mode output (see above).
 - clear("#rrggbb") -> fill the whole frame with a color. Colors are always "#rrggbb" strings.
 - rect(x, y, w, h, color, radius = 0) -> filled rectangle (radius rounds the corners).
@@ -206,6 +214,14 @@ Temperature readout (text mode — the element's own style does the layout):
       text("Office temp unavailable")
   else:
       text(f"Office {temp:.1f}°C")
+Web JSON (data source + jq + elif ladder, text mode):
+  temp = jq(source("weather"), ".current.temp_c")
+  if temp == None:
+      text("Weather unavailable")
+  elif temp < 10:
+      text(f"Cold: {temp:.1f}°C")
+  else:
+      text(f"{temp:.1f}°C")
 Sparkline (loop + line + a small label; size 11 = 8px glyphs, so the 5-char clock is 40px wide):
   clear("#121826")
   last_x = 0
@@ -219,15 +235,17 @@ Sparkline (loop + line + a small label; size 11 = 8px glyphs, so the 5-char cloc
   label(5, 5, now("%H:%M"), "#f2c94c", 11, "la")
 
 ## Home Assistant
-HA elements and ha() read live entity states from the user's connected Home Assistant; the current entity list (id = state) is included in the context message when HA is connected. Only use entity ids from that list or already present in the design; never invent entity ids. ha-toggle works for entities in domains like light, switch, fan, cover, climate (anything with on/off). When Home Assistant is connected you also have list_home_assistant_sensors — call it when you need the full live entity list with names, states and units (the context message only carries a truncated summary).
+HA elements and ha() read live entity states from the user's connected Home Assistant; the current entity list (id = state) is included in the context message when HA is connected. Only use entity ids from that list or already present in the design; never invent entity ids. ha-toggle works for entities in domains like light, switch, fan, cover, climate (anything with on/off). When Home Assistant is connected you also have list_home_assistant_sensors — call it when you need the full live entity list with names, states and units (the context message only carries a truncated summary). It filters: pattern greps id+name, domain matches one HA domain, state greps the state value, limit caps how many come back.
 
 ## How to work
 - This conversation starts with a copy of the open design's full Design JSON and a render of its active page. Work from that copy; call get_current_design to refresh it whenever the design may have changed since (after the user edits in the Studio, or when you need the ground truth again).
 - To change the design, call write_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
 - For a change to ONE existing element, prefer write_element_json: pass the element id and the complete updated element as a JSON object (get_element_json fetches the current one). Reserve write_design_json for structural changes (adding or removing elements or pages).
+- For a change confined to ONE page (renaming it, reworking several of its elements at once), prefer write_page_json: pass the page id and the complete updated page as a JSON object (get_page_json fetches the current one; omit pageId there for the page open in the editor). It replaces just that page; the rest of the design is untouched.
+- For READING the design and for mechanical bulk edits, use jq_design: it runs a jq program over the design JSON on the server (Rust jaq). Reads return just the matching slices ('.pages[] | {id, name}', '[.. | objects | select(.type == "text")]'), and apply=true turns the program's single output into the new design — ideal for renames, prop sweeps, deletes and reorders without re-emitting the document ('.pages[0].elements |= map(if .type == "text" then .style.fontSize = 20 else . end)').
 - To write or change a script element's code, use write_script_code with the code as one plain string. Never embed script code inside write_design_json or write_element_json payloads — nested inside that JSON, the script's quotes and newlines need double escaping and usually arrive broken.
 - Then call view_screen and actually look at the render before saving: fix overlaps, clipped or unreadable text, and elements running off the page. view_screen renders the open design including your unsaved changes, with live values, and returns an image; pass pageId to inspect a different page, or designId + pageId for another design.
-- After a successful edit (write_design_json, write_element_json, or write_script_code), call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
+- After a successful edit (write_design_json, write_page_json, write_element_json, or write_script_code), call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
 - Keep frames inside the page, avoid overlaps unless asked, give new elements unique ids, and prefer fontSize >= 12 for readable text on the small display.
 - Be concise in chat. Summarize what you changed in one or two sentences; do not paste the whole JSON back.`;
 
@@ -278,6 +296,50 @@ const TOOLS = [
           element: { type: "object", description: "The complete replacement element object (same shape as in the Design JSON; its id is forced to elementId)." },
         },
         required: ["elementId", "element"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_page_json",
+      description: "Return ONE page of the design currently open in the editor, as a JSON object — the starting point for editing just that page. Omit pageId for the page currently open in the editor.",
+      parameters: {
+        type: "object",
+        properties: { pageId: { type: "string", description: "The page's id. Omit for the editor's current page." } },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_page_json",
+      description: "Replace ONE page of the open design, by id, with the complete updated page passed as a JSON object (not a string) — its elements, name, background and layout. Every other page and the shared elements are untouched. The whole design is re-validated against the device schema and applied to the editor; returns validation errors if any. Use get_page_json first to see the page as it is. This cannot add or remove pages — use write_design_json for that. For script code inside the page, prefer write_script_code after the page write (or keep the script elements' props.code exactly as get_page_json returned them).",
+      parameters: {
+        type: "object",
+        properties: {
+          pageId: { type: "string", description: "The id of the page to replace." },
+          page: { type: "object", description: "The complete replacement page object (same shape as in the Design JSON; its id is forced to pageId)." },
+        },
+        required: ["pageId", "page"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "jq_design",
+      description: "Run a jq program (Rust jaq, full jq syntax) over the open design's JSON — the token-efficient way to read and mechanically edit designs. Read mode (default): returns the program's outputs, e.g. '.pages | map({id, name})', '[.. | objects | select(.type==\"ha-toggle\")]', '.pages[0].elements | length'. Edit mode (apply=true): the program must output exactly ONE value — the complete transformed design — which is validated against the device schema and applied to the editor (jq assignment/update syntax works: '.background = \"#000\"', '.pages |= map(if .id == \"main\" then .name = \"Home\" else . end)', 'del(.pages[] | select(.id == \"old\"))'). Prefer this over write_design_json for mechanical edits; keep using write_script_code to author script code (jq can carry it, but the flat tool avoids escaping accidents).",
+      parameters: {
+        type: "object",
+        properties: {
+          program: { type: "string", description: "The jq program, e.g. '.pages[].name' or '.pages[0].elements |= map(del(.locked))'." },
+          apply: { type: "boolean", description: "true = the program's single output replaces the design (validated + applied to the editor). Default false = read-only query." },
+        },
+        required: ["program"],
         additionalProperties: false,
       },
     },
@@ -341,11 +403,14 @@ const TOOLS = [
     type: "function",
     function: {
       name: "list_home_assistant_sensors",
-      description: "List the user's Home Assistant entities (sensors and other devices) with their current live states, names and units. Only available while Home Assistant is connected. Pass pattern to grep the list instead of returning everything.",
+      description: "List the user's Home Assistant entities (sensors and other devices) with their current live states, names and units. Only available while Home Assistant is connected. All filters combine (AND): pattern greps id+name, domain matches one HA domain, state greps the state value, limit caps the results. Prefer filtering — the full list can be thousands of entities.",
       parameters: {
         type: "object",
         properties: {
-          pattern: { type: "string", description: "Optional regex (grep-style, case-insensitive) matched against each entity's id and name — e.g. '^sensor\\.' or 'temperature|humidity'. Omit to list everything." },
+          pattern: { type: "string", description: "Optional regex (grep-style, case-insensitive) matched against each entity's id and name — e.g. '^sensor\\.' or 'temperature|humidity'." },
+          domain: { type: "string", description: "Optional single Home Assistant domain to match exactly — e.g. 'sensor', 'binary_sensor', 'light', 'climate'." },
+          state: { type: "string", description: "Optional regex (case-insensitive) matched against each entity's current state value — e.g. '^on$' or '^[0-9]+$' for numeric states." },
+          limit: { type: "integer", description: "Optional maximum number of entities to return (default 200, max 1000). The result reports totalMatched and truncated when more matched than were returned." },
         },
         additionalProperties: false,
       },
@@ -484,6 +549,73 @@ async function toolSetElementJson(args) {
   };
 }
 
+async function toolGetPageJson(args) {
+  if (!S.layout) throw new Error("No design is open in the editor yet.");
+  const designId = S.editingDesignId ?? S.currentDesignId;
+  const pageId = args.pageId || activePageIdFor(designId);
+  const page = pageOf(S.layout, pageId);
+  if (!page) {
+    const ids = (S.layout.pages || []).map((p) => p.id).join(", ");
+    return { error: `No page with id "${pageId}" in the open design. Pages: ${ids}` };
+  }
+  return { pageId, page };
+}
+
+async function toolSetPageJson(args) {
+  if (!S.layout) throw new Error("No design is open in the editor yet.");
+  if (!args.page || typeof args.page !== "object" || Array.isArray(args.page)) {
+    return { applied: false, error: "Pass the complete replacement page as a JSON object in 'page'." };
+  }
+  const doc = structuredClone(S.layout);
+  const index = (doc.pages || []).findIndex((p) => p.id === args.pageId);
+  if (index < 0) {
+    return { applied: false, error: `No page with id "${args.pageId}" in the open design. Use write_design_json to add pages.` };
+  }
+  doc.pages[index] = { ...args.page, id: args.pageId };
+  const applied = await applyDesignDoc(doc);
+  if (!applied.applied) return applied;
+  const designId = S.editingDesignId ?? S.currentDesignId;
+  setActivePage(designId, args.pageId);
+  renderAll();
+  return {
+    applied: true,
+    pageId: args.pageId,
+    name: args.page.name,
+    elements: (args.page.elements || []).length,
+    note: "Page updated in the editor (not saved yet — call save_design to persist).",
+  };
+}
+
+async function toolJqDesign(args) {
+  if (!S.layout) throw new Error("No design is open in the editor yet.");
+  const program = typeof args.program === "string" ? args.program : "";
+  if (!program.trim()) return { error: "Pass a jq program in 'program'." };
+  const response = await fetch("/api/jq", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ program, input: S.layout }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) return { error: data.error || `jq failed (server returned ${response.status})` };
+  if (!args.apply) {
+    return { outputs: data.outputs, ...(data.truncated ? { truncated: true } : {}) };
+  }
+  const outputs = Array.isArray(data.outputs) ? data.outputs : [];
+  if (outputs.length !== 1 || typeof outputs[0] !== "object" || outputs[0] === null || Array.isArray(outputs[0])) {
+    return {
+      applied: false,
+      error: `With apply=true the program must output exactly one design object; it output ${outputs.length} value(s)${outputs.length ? `, the first a ${Array.isArray(outputs[0]) ? "array" : typeof outputs[0]}` : ""}. End the program with a single whole-document expression.`,
+    };
+  }
+  const applied = await applyDesignDoc(outputs[0]);
+  if (!applied.applied) return applied;
+  return {
+    applied: true,
+    summary: designSummary(S.layout),
+    note: "jq edit applied to the editor (not saved yet — call save_design to persist).",
+  };
+}
+
 async function toolSetScriptCode(args) {
   if (!S.layout) throw new Error("No design is open in the editor yet.");
   if (typeof args.code !== "string") {
@@ -575,6 +707,12 @@ async function toolListScreens() {
 }
 
 /** Home Assistant counts as enabled only while it is connected here. */
+/** The user's chosen thinking level: "off" | "low" | "medium" | "high". */
+function reasoningEffort() {
+  const value = localStorage.getItem(REASONING_STORAGE);
+  return ["low", "medium", "high"].includes(value) ? value : "off";
+}
+
 function haEnabled() {
   return Boolean(S.homeAssistant?.configured);
 }
@@ -589,25 +727,46 @@ async function toolListHomeAssistantSensors(args) {
   if (!haEnabled()) {
     return { enabled: false, sensors: [], note: "Home Assistant is not connected in this Studio, so no sensors are available." };
   }
-  let regex = null;
-  if (args.pattern) {
+  const compile = (value, label) => {
+    if (!value) return null;
     try {
-      regex = new RegExp(args.pattern, "i");
+      return new RegExp(value, "i");
     } catch (error) {
-      return { error: `Invalid regex "${args.pattern}": ${error.message}` };
+      throw new Error(`Invalid ${label} regex "${value}": ${error.message}`);
     }
+  };
+  let regex;
+  let stateRegex;
+  try {
+    regex = compile(args.pattern, "pattern");
+    stateRegex = compile(args.state, "state");
+  } catch (error) {
+    return { error: error.message };
   }
+  const domain = args.domain ? String(args.domain).replace(/\.+$/, "").toLowerCase() : null;
+  const limit = Math.min(1000, Math.max(1, Number.isFinite(args.limit) ? Math.floor(args.limit) : 200));
   const all = (S.homeAssistant.entities || []).map((e) => ({
     entityId: e.entityId,
     name: e.name,
     state: e.state,
     ...(e.unit ? { unit: e.unit } : {}),
   }));
-  const sensors = regex ? all.filter((e) => regex.test(e.entityId) || regex.test(e.name || "")) : all;
+  const matched = all.filter((e) => {
+    if (domain && (e.entityId.split(".", 1)[0] || "").toLowerCase() !== domain) return false;
+    if (regex && !(regex.test(e.entityId) || regex.test(e.name || ""))) return false;
+    if (stateRegex && !stateRegex.test(String(e.state ?? ""))) return false;
+    return true;
+  });
+  const sensors = matched.slice(0, limit);
   return {
     enabled: true,
     count: sensors.length,
-    ...(regex ? { pattern: args.pattern, totalCount: all.length } : {}),
+    totalMatched: matched.length,
+    totalCount: all.length,
+    ...(matched.length > sensors.length ? { truncated: true } : {}),
+    ...(args.pattern ? { pattern: args.pattern } : {}),
+    ...(domain ? { domain } : {}),
+    ...(args.state ? { state: args.state } : {}),
     sensors,
   };
 }
@@ -633,6 +792,9 @@ const TOOL_IMPL = {
   write_design_json: toolSetDesignJson,
   get_element_json: toolGetElementJson,
   write_element_json: toolSetElementJson,
+  get_page_json: toolGetPageJson,
+  write_page_json: toolSetPageJson,
+  jq_design: toolJqDesign,
   write_script_code: toolSetScriptCode,
   save_design: toolSaveDesign,
   view_screen: toolViewScreen,
@@ -1173,6 +1335,7 @@ async function streamChat(messages) {
       tools: availableTools(),
       stream: true,
       usage: { include: true },
+      ...(reasoningEffort() !== "off" ? { reasoning: { effort: reasoningEffort() } } : {}),
     }),
   });
   if (!response.ok) {
@@ -1649,6 +1812,11 @@ export function initAgentPage() {
     localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
     syncModelButton();
   };
+  const reasoningSelect = $("agent-reasoning");
+  if (reasoningSelect) {
+    reasoningSelect.value = reasoningEffort();
+    reasoningSelect.onchange = () => localStorage.setItem(REASONING_STORAGE, reasoningSelect.value);
+  }
   $("agent-model-button").onclick = (event) => {
     event.stopPropagation();
     setModelDropdown($("agent-model-dropdown").classList.contains("hidden"));

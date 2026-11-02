@@ -633,6 +633,8 @@ esp-web-install-button { display: inline-block; }
 /* Status bar under the composer: model picker bottom-left, usage right. */
 .agent-statusbar { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; min-height: 28px; }
 .agent-usage { font-size: 11px; color: var(--muted); text-align: right; white-space: nowrap; }
+.agent-reasoning-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.agent-reasoning-select { background: #1d222c; color: var(--text); border: 1px solid var(--line); border-radius: 7px; font-size: 11px; padding: 3px 5px; cursor: pointer; }
 .agent-model-picker { min-width: 0; }
 .agent-model-button { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; border: 0; background: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 5px 8px; border-radius: 8px; }
 .agent-model-button:hover { color: var(--text); background: #1d222c; }
