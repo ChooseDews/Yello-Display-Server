@@ -602,3 +602,4 @@ esp-web-install-button { display: inline-block; }
 .image-upload-button { cursor: pointer; }
 .image-picker { width: 100%; }
 .sel-action[aria-pressed="true"] { background: #2b3550; }
+.tool-thumb { display: block; margin-top: 6px; width: 120px; border: 1px solid var(--line); border-radius: 6px; }

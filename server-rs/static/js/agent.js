@@ -110,6 +110,7 @@ HA elements and ha() read live entity states from the user's connected Home Assi
 ## How to work
 - Always call get_current_design first and edit the JSON it returns — it is the ground truth for this design's shapes and conventions.
 - To change the design, call set_design_json with the COMPLETE updated document as a JSON string. It is validated against the device schema and applied to the editor (the user can undo). If validation returns errors, fix them and retry.
+- Then call view_screen and actually look at the render before saving: fix overlaps, clipped or unreadable text, and elements running off the page. view_screen renders the open design including your unsaved changes, with live values, and returns an image; pass pageId to inspect a different page, or designId + pageId for another design.
 - After a successful set_design_json, call save_design in the same turn (saving pushes the design to the screens using it), unless the user asked only to draft or preview.
 - Use validate_design to check a document without applying it.
 - Keep frames inside the page, avoid overlaps unless asked, give new elements unique ids, and prefer fontSize >= 12 for readable text on the small display.
@@ -156,6 +157,21 @@ const TOOLS = [
       name: "save_design",
       description: "Save the current design to the server and push it to the screens using it (the Studio's normal save).",
       parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "view_screen",
+      description: "Render a design page exactly as the server renders it for the device — with live Home Assistant and external values — and return the render as an image you can look at. Use it after editing to check layout, overlaps, and readability before saving. Defaults to the page currently active in the editor of the open design (unsaved changes included); pass designId to view another design's saved home page (or pageId within it) instead. Requires a vision-capable model.",
+      parameters: {
+        type: "object",
+        properties: {
+          designId: { type: "string", description: "Design id to view; defaults to the open design." },
+          pageId: { type: "string", description: "Page id within the design; defaults to the active page (open design) or home page." },
+        },
+        additionalProperties: false,
+      },
     },
   },
   {
@@ -265,6 +281,58 @@ async function toolSaveDesign() {
   return { saved: true, dirty: S.dirty };
 }
 
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Could not read the rendered image."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Render a design page server-side (live HA/external values included) and
+ * hand the PNG to the model as an image. The loop picks the `image` field
+ * out of the result and attaches it as a vision input; it is stripped
+ * before the tool result is stored as text.
+ */
+async function toolViewScreen(args) {
+  const designId = args.designId || S.currentDesignId;
+  let layout;
+  let designName;
+  if (designId === S.currentDesignId && S.layout) {
+    layout = S.layout;
+    designName = S.layout.name;
+  } else {
+    const data = await fetchJson(`/api/layout?design=${encodeURIComponent(designId)}`);
+    layout = data.layout;
+    designName = layout?.name || designId;
+  }
+  if (!layout) throw new Error(`Design ${designId} could not be loaded.`);
+  const pageId = args.pageId || (designId === S.currentDesignId ? activePageIdFor(designId) : homePageIdOf(layout));
+  const page = pageOf(layout, pageId);
+  if (!page) throw new Error(`Page ${pageId} does not exist in design ${designId}.`);
+  const response = await fetch(`/api/preview?design=${encodeURIComponent(designId)}&page=${encodeURIComponent(pageId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(layout),
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(detail.error || `Preview render failed (HTTP ${response.status}).`);
+  }
+  const dataUrl = await blobToDataUrl(await response.blob());
+  const landscape = layout.orientation === "landscape";
+  const width = landscape ? 320 : 240;
+  const height = landscape ? 240 : 320;
+  return {
+    viewed: { designId, designName, pageId, pageName: page.name, width, height },
+    note: "The rendered image is attached next; inspect it for layout problems (overlaps, clipping, unreadable text).",
+    image: dataUrl,
+    imageCaption: `Live render of design "${designName}", page "${page.name}" (${width}x${height}), rendered just now with current values:`,
+  };
+}
+
 async function toolListDesigns() {
   return S.studio.designs.map((d) => ({ id: d.id, name: d.name, revision: d.revision, pages: d.pageCount, orientation: d.orientation }));
 }
@@ -294,6 +362,7 @@ const TOOL_IMPL = {
   set_design_json: toolSetDesignJson,
   validate_design: toolValidateDesign,
   save_design: toolSaveDesign,
+  view_screen: toolViewScreen,
   list_designs: toolListDesigns,
   list_screens: toolListScreens,
   open_design: toolOpenDesign,
@@ -367,10 +436,18 @@ function addToolEntry(name, argsJson) {
   box.append(wrap);
   box.scrollTop = box.scrollHeight;
   return {
-    finish(resultObj, ok) {
+    finish(resultObj, ok, imageUrl) {
       chip.textContent = `${ok ? "✓" : "✕"} ${name}`;
       const pretty = JSON.stringify(resultObj, null, 2) || "";
       result.textContent = pretty.length > 4000 ? `${pretty.slice(0, 4000)}…` : pretty;
+      if (imageUrl) {
+        const img = document.createElement("img");
+        img.className = "tool-thumb";
+        img.src = imageUrl;
+        img.alt = "Rendered screen view";
+        wrap.append(img);
+        box.scrollTop = box.scrollHeight;
+      }
     },
   };
 }
@@ -519,6 +596,23 @@ async function streamChat(messages) {
   return { content, toolCalls: [...toolCalls.values()], usage };
 }
 
+/** Only the newest view_screen image is worth its tokens on later rounds:
+ *  once a newer render exists, older ones collapse to their caption. */
+function compactedHistory() {
+  let lastImageIndex = -1;
+  conversation.forEach((message, index) => {
+    if (Array.isArray(message.content) && message.content.some((part) => part.type === "image_url")) {
+      lastImageIndex = index;
+    }
+  });
+  if (lastImageIndex < 0) return conversation;
+  return conversation.map((message, index) => {
+    if (index >= lastImageIndex || !Array.isArray(message.content)) return message;
+    const text = message.content.find((part) => part.type === "text")?.text || "Rendered view:";
+    return { role: "user", content: `${text} [image omitted — a newer render follows]` };
+  });
+}
+
 async function sendAgentMessage() {
   const input = $("agent-input");
   const text = input.value.trim();
@@ -551,7 +645,7 @@ async function sendAgentMessage() {
       const { content, toolCalls, usage } = await streamChat([
         { role: "system", content: SYSTEM_PROMPT },
         context,
-        ...conversation,
+        ...compactedHistory(),
       ]);
       if (usage) {
         usageTotals.in += usage.prompt_tokens || 0;
@@ -573,12 +667,30 @@ async function sendAgentMessage() {
         const entry = addToolEntry(call.name, call.arguments);
         const result = await runTool(call.name, call.arguments);
         const failed = Boolean(result && (result.error || result.applied === false || result.valid === false));
-        entry.finish(result, !failed);
+        // A view_screen result carries a rendered image: keep it out of the
+        // text tool result and attach it as a vision input right after.
+        const image = result?.image;
+        const caption = result?.imageCaption;
+        const textResult = image ? { ...result } : result;
+        if (textResult) {
+          delete textResult.image;
+          delete textResult.imageCaption;
+        }
+        entry.finish(textResult, !failed, image);
         conversation.push({
           role: "tool",
           tool_call_id: call.id,
-          content: JSON.stringify(result).slice(0, 60000),
+          content: JSON.stringify(textResult).slice(0, 60000),
         });
+        if (image && !failed) {
+          conversation.push({
+            role: "user",
+            content: [
+              { type: "text", text: caption || "Rendered view:" },
+              { type: "image_url", image_url: { url: image } },
+            ],
+          });
+        }
       }
     }
   } catch (error) {
