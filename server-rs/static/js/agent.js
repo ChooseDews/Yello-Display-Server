@@ -29,8 +29,6 @@ const API_BASE = localStorage.getItem("yello-openrouter-base") || "https://openr
 const MAX_TOOL_ROUNDS = 10;
 
 let initialized = false;
-let sending = false;
-let aborter = null;
 let dockOpen = false;
 let panelMode = localStorage.getItem("yello-agent-panel-mode") === "float" ? "float" : "dock";
 
@@ -74,8 +72,6 @@ function applyPanelGeometry(inPanel) {
     floatButton.title = panelMode === "float" ? "Dock" : "Undock";
   }
 }
-const usageTotals = { in: 0, out: 0, cost: 0 };
-const conversation = []; // OpenAI-format messages (system prompt added per request)
 
 const isWide = () => window.matchMedia("(min-width: 1200px)").matches;
 
@@ -965,9 +961,13 @@ const TOOL_IMPL = {
   assign_design: toolAssignDesign,
 };
 
-/** While any tool call runs, the designer window breathes a green border. */
+/** While any tool call runs (in any agent window), the designer view
+ *  breathes a glowing green border. Refcounted: parallel calls from
+ *  several windows keep it lit until the last one finishes. */
+let toolPulseCount = 0;
 function setToolPulse(on) {
-  document.querySelectorAll(".canvas-area").forEach((el) => el.classList.toggle("tool-pulse", on));
+  toolPulseCount = Math.max(0, toolPulseCount + (on ? 1 : -1));
+  document.querySelectorAll(".canvas-area").forEach((el) => el.classList.toggle("tool-pulse", toolPulseCount > 0));
 }
 
 async function runTool(name, argsJson) {
@@ -1001,30 +1001,100 @@ function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
 
-function markdownLite(text) {
-  const parts = text.split(/```(?:\w+)?\n?/);
-  return parts
-    .map((part, index) => {
-      if (index % 2 === 1) return `<pre>${escapeHtml(part.replace(/\n$/, ""))}</pre>`;
-      return escapeHtml(part)
-        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/\n/g, "<br>");
-    })
-    .join("");
+// ---------- markdown rendering (assistant messages) ----------
+// A small, safe renderer: everything is HTML-escaped first, then block
+// structure (headings, lists, quotes, fenced code, GFM tables) and inline
+// spans (code, bold, italic, strike, links) are built from the escaped
+// text, so model output can never inject markup.
+
+function inlineMarkdown(raw) {
+  let s = escapeHtml(raw);
+  const codes = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => {
+    codes.push(c);
+    return `\u0001${codes.length - 1}\u0002`;
+  });
+  s = s.replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">🖼 $1</a>');
+  s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+|mailto:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*\w])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  s = s.replace(/\u0001(\d+)\u0002/g, (_, n) => `<code>${codes[Number(n)]}</code>`);
+  return s;
 }
 
-function addMessage(role, text = "") {
-  // Never render an empty assistant bubble.
-  if (role === "assistant" && !text.trim()) return null;
-  closeToolGroup();
-  const box = $("agent-messages");
-  const el = document.createElement("div");
-  el.className = `msg ${role}`;
-  el.innerHTML = role === "assistant" ? markdownLite(text) : escapeHtml(text).replace(/\n/g, "<br>");
-  box.append(el);
-  box.scrollTop = box.scrollHeight;
-  return el;
+function renderMarkdown(text) {
+  const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+  const isTableSep = (line) => /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(line);
+  const splitRow = (line) => {
+    let s = line.trim();
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|")) s = s.slice(0, -1);
+    return s.split("|").map((c) => c.trim());
+  };
+  const html = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      const buf = [];
+      i += 1;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) { buf.push(lines[i]); i += 1; }
+      i += 1;
+      html.push(`<pre><code>${escapeHtml(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+    if (!line.trim()) { i += 1; continue; }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      html.push(`<div class="md-h md-h${heading[1].length}">${inlineMarkdown(heading[2])}</div>`);
+      i += 1;
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { html.push("<hr>"); i += 1; continue; }
+    if (line.includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const head = splitRow(line);
+      const aligns = splitRow(lines[i + 1]).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : "left"));
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) { rows.push(splitRow(lines[i])); i += 1; }
+      const cell = (tag, content, align) => `<${tag}${align && align !== "left" ? ` style="text-align:${align}"` : ""}>${inlineMarkdown(content || "")}</${tag}>`;
+      const body = rows.map((r) => `<tr>${head.map((_, j) => cell("td", r[j] || "", aligns[j])).join("")}</tr>`).join("");
+      html.push(`<div class="md-table-wrap"><table class="md-table"><thead><tr>${head.map((c, j) => cell("th", c, aligns[j])).join("")}</tr></thead><tbody>${body}</tbody></table></div>`);
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, "")); i += 1; }
+      html.push(`<blockquote>${buf.map((l) => inlineMarkdown(l)).join("<br>")}</blockquote>`);
+      continue;
+    }
+    if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
+      const items = [];
+      let ordered = null;
+      while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
+        const m = lines[i].match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
+        if (ordered === null) ordered = /\d/.test(m[1]);
+        items.push(m[2]);
+        i += 1;
+      }
+      const tag = ordered ? "ol" : "ul";
+      html.push(`<${tag}>${items.map((t) => `<li>${inlineMarkdown(t)}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+    const buf = [line];
+    i += 1;
+    while (i < lines.length && lines[i].trim()
+      && !/^```/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i])
+      && !/^\s*>\s?/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])
+      && !(lines[i].includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1]))) {
+      buf.push(lines[i]);
+      i += 1;
+    }
+    html.push(`<p>${buf.map((l) => inlineMarkdown(l)).join("<br>")}</p>`);
+  }
+  return html.join("");
 }
 
 /** Expand string values that are themselves JSON (e.g. a whole design
@@ -1080,210 +1150,19 @@ function makeJsonBlock() {
   };
 }
 
-// Consecutive tool calls share one group: their chips sit side by side in
-// a wrapping row, with the dev-mode JSON bodies stacked underneath. Any
-// other transcript content closes the group.
-let openToolGroup = null;
-
-function closeToolGroup() {
-  openToolGroup = null;
+function fmtTokens(n) {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0);
 }
 
-function currentToolGroup(box) {
-  if (openToolGroup && openToolGroup.group.isConnected && box.lastElementChild === openToolGroup.group) {
-    return openToolGroup;
-  }
-  const group = document.createElement("div");
-  group.className = "tool-group";
-  const chips = document.createElement("div");
-  chips.className = "tool-chips";
-  const bodies = document.createElement("div");
-  bodies.className = "tool-bodies";
-  group.append(chips, bodies);
-  box.append(group);
-  openToolGroup = { group, chips, bodies };
-  return openToolGroup;
-}
-
-// One tool call in the transcript: a chip in the current group's chip row;
-// in dev mode the arguments and result JSON show in the group's bodies.
-function addToolEntry(name, argsJson) {
-  const box = $("agent-messages");
-  const group = currentToolGroup(box);
-  const chip = document.createElement("div");
-  chip.className = "tool-chip";
-  chip.textContent = `… ${name}`;
-  group.chips.append(chip);
-  const body = document.createElement("div");
-  body.className = "tool-body";
-  const args = makeJsonBlock();
-  let parsedArgs = argsJson || "{}";
-  try {
-    parsedArgs = JSON.parse(argsJson || "{}");
-  } catch { /* keep raw */ }
-  args.set(parsedArgs);
-  const result = makeJsonBlock();
-  body.append(args.wrap, result.wrap);
-  group.bodies.append(body);
-  box.scrollTop = box.scrollHeight;
-  return {
-    finish(resultObj, ok, imageUrl) {
-      chip.textContent = `${ok ? "✓" : "✕"} ${name}`;
-      chip.classList.add(ok ? "tool-ok" : "tool-fail");
-      if (!ok) body.classList.add("tool-fail");
-      result.set(resultObj);
-      if (imageUrl) {
-        const img = document.createElement("img");
-        img.className = "tool-thumb";
-        img.src = imageUrl;
-        img.alt = "Rendered screen view";
-        body.append(img);
-        box.scrollTop = box.scrollHeight;
-      }
-    },
-  };
-}
-
-// An assistant turn: an optional thinking block (dev mode only) above the
-// streamed bubble. The bubble stays out of the DOM until the turn actually
-// has text — tool-only and thinking-only rounds must not leave an empty
-// assistant pill behind. setContent("") removes it again.
-function addAssistantTurn() {
-  closeToolGroup();
-  const box = $("agent-messages");
-  const row = document.createElement("div");
-  row.className = "msg-row";
-  const thinking = document.createElement("details");
-  thinking.className = "thinking";
-  const summary = document.createElement("summary");
-  summary.textContent = "Thinking";
-  const thinkingBody = document.createElement("div");
-  thinkingBody.className = "thinking-body";
-  thinking.append(summary, thinkingBody);
-  const bubble = document.createElement("div");
-  bubble.className = "msg assistant";
-  box.append(row);
-  box.scrollTop = box.scrollHeight;
-  return {
-    bubble,
-    thinkingBody,
-    row,
-    setThinking(text) {
-      if (!text || !text.trim()) return;
-      if (!thinking.isConnected) row.insertBefore(thinking, bubble.isConnected ? bubble : null);
-      thinkingBody.textContent = text;
-    },
-    setContent(text) {
-      // Whitespace-only text (or text that renders to nothing but <br>)
-      // must never surface as an empty bubble.
-      if (text && text.trim()) {
-        if (!bubble.isConnected) row.append(bubble);
-        bubble.innerHTML = markdownLite(text);
-      } else {
-        bubble.remove();
-      }
-    },
-    /** Drop the whole row if the turn produced neither text nor thinking. */
-    finish() {
-      if (!bubble.isConnected && !thinking.isConnected) row.remove();
-    },
-  };
-}
-
-// ---------- Dev-mode context graph ----------
-// A stacked bar estimating what the next request's context is made of:
-// system prompt, tool definitions, model thinking, tool calls/results,
-// images, and plain text. Text is estimated at chars/4; images at a flat
-// ~258 tokens each (their real vision cost, not their data-URL length).
-const CONTEXT_SEGMENTS = [
-  { key: "system", label: "System", color: "#6b9cff" },
-  { key: "tools", label: "Tools", color: "#b388ff" },
-  { key: "thinking", label: "Thinking", color: "#4dd0e1" },
-  { key: "toolcalls", label: "Tool calls", color: "#f2c94c" },
-  { key: "images", label: "Images", color: "#f48fb1" },
-  { key: "text", label: "Text", color: "#8a93a5" },
-];
-
-function renderContextGraph() {
-  const bar = $("agent-context-bar");
-  const legend = $("agent-context-legend");
-  if (!bar || !legend) return;
-  const est = (chars) => Math.ceil(chars / 4);
-  const seg = {
-    system: est(SYSTEM_PROMPT.length),
-    tools: est(JSON.stringify(availableTools()).length),
-    thinking: 0,
-    toolcalls: 0,
-    images: 0,
-    text: 0,
-  };
-  for (const message of conversation) {
-    if (message._reasoning) seg.thinking += est(String(message._reasoning).length);
-    if (message.role === "tool") {
-      seg.toolcalls += est(String(message.content ?? "").length);
-      continue;
-    }
-    if (Array.isArray(message.tool_calls)) {
-      for (const call of message.tool_calls) {
-        seg.toolcalls += est((call.function?.name || "").length + (call.function?.arguments || "").length);
-      }
-    }
-    if (typeof message.content === "string") {
-      seg.text += est(message.content.length);
-    } else if (Array.isArray(message.content)) {
-      for (const part of message.content) {
-        if (part.type === "text") seg.text += est(part.text.length);
-        else if (part.type === "image_url") seg.images += 258;
-      }
-    }
-  }
-  const total = Object.values(seg).reduce((sum, n) => sum + n, 0);
-  bar.replaceChildren();
-  legend.replaceChildren();
-  for (const { key, label, color } of CONTEXT_SEGMENTS) {
-    const tokens = seg[key];
-    if (total > 0 && tokens > 0) {
-      const slice = document.createElement("span");
-      slice.style.width = `${(tokens / total) * 100}%`;
-      slice.style.background = color;
-      slice.title = `${label}: ≈${tokens.toLocaleString("en-US")} tokens`;
-      bar.append(slice);
-    }
-    const item = document.createElement("span");
-    item.className = "agent-context-item";
-    const dot = document.createElement("span");
-    dot.className = "agent-context-dot";
-    dot.style.background = color;
-    item.append(dot, `${label} ≈${tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : tokens}`);
-    legend.append(item);
-  }
-}
-
-function renderUsage() {
-  renderContextGraph();
-  const el = $("agent-usage");
-  if (!el) return;
-  if (!usageTotals.in && !usageTotals.out) {
-    el.textContent = "";
-    return;
-  }
-  const fmt = (n) => n.toLocaleString("en-US");
-  el.textContent = `${fmt(usageTotals.in)} in · ${fmt(usageTotals.out)} out` +
-    (usageTotals.cost ? ` · $${usageTotals.cost.toFixed(4)}` : "");
-  el.title = "Session token usage";
-}
-
-// ---------- OpenRouter ----------
+// ---------- OpenRouter (shared provider state) ----------
 
 function apiKey() {
   return localStorage.getItem(KEY_STORAGE) || "";
 }
 
-// ---------- model picker ----------
 // Only vision-capable models are offered: view_screen hands the model a
 // rendered image, so a text-only model cannot do the job. Favorites are
 // pinned to the top of the picker and stored in this browser only.
-
 const FAV_STORAGE = "yello-agent-fav-models";
 let visionModels = [];
 let modelsLoadOk = false;
@@ -1326,95 +1205,21 @@ function modelMetaText(model) {
   return bits.join(" · ");
 }
 
-function selectedModel() {
-  return visionModels.find((m) => m.id === $("agent-model").value) || null;
+function modelById(id) {
+  return visionModels.find((m) => m.id === id) || null;
 }
 
-function syncModelButton() {
-  const model = selectedModel();
-  $("agent-model-label").textContent = model ? (model.name || model.id) : "Select a model";
-  $("agent-model-button").title = model ? model.id : "Choose a model";
-}
-
-function selectModel(id) {
-  const select = $("agent-model");
-  if (![...select.options].some((o) => o.value === id)) return;
-  select.value = id;
-  localStorage.setItem(MODEL_STORAGE, id);
-  syncModelButton();
-  renderModelList();
-}
-
-function renderModelList() {
-  const list = $("agent-model-list");
-  if (!list) return;
-  const query = ($("agent-model-search").value || "").trim().toLowerCase();
+/** The model a fresh window starts with: the last-used model, else the
+ *  first favorite, else a Claude Sonnet, else the first vision model. */
+function defaultModelId() {
+  const stored = localStorage.getItem(MODEL_STORAGE);
+  if (stored && visionModels.some((m) => m.id === stored)) return stored;
   const favs = loadFavorites();
-  const matches = visionModels.filter((m) => !query || `${m.name || ""} ${m.id}`.toLowerCase().includes(query));
-  const current = $("agent-model").value;
-  list.replaceChildren();
-  const addGroup = (title, models) => {
-    if (!models.length) return;
-    const head = document.createElement("div");
-    head.className = "agent-model-group";
-    head.textContent = title;
-    list.append(head);
-    for (const model of models) {
-      const row = document.createElement("div");
-      row.className = `agent-model-row${model.id === current ? " selected" : ""}`;
-      const pick = document.createElement("button");
-      pick.type = "button";
-      pick.className = "agent-model-pick";
-      pick.setAttribute("role", "option");
-      pick.setAttribute("aria-selected", String(model.id === current));
-      const name = document.createElement("span");
-      name.className = "agent-model-name";
-      name.textContent = model.name || model.id;
-      const meta = document.createElement("span");
-      meta.className = "agent-model-meta";
-      meta.textContent = modelMetaText(model);
-      pick.append(name, meta);
-      pick.onclick = () => {
-        selectModel(model.id);
-        setModelDropdown(false);
-      };
-      const fav = document.createElement("button");
-      fav.type = "button";
-      fav.className = `agent-model-fav${favs.has(model.id) ? " is-fav" : ""}`;
-      fav.title = favs.has(model.id) ? "Remove from favorites" : "Add to favorites";
-      fav.setAttribute("aria-label", fav.title);
-      fav.setAttribute("aria-pressed", String(favs.has(model.id)));
-      fav.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-star"></use></svg>';
-      fav.onclick = () => {
-        const next = loadFavorites();
-        if (next.has(model.id)) next.delete(model.id);
-        else next.add(model.id);
-        saveFavorites(next);
-        renderModelList();
-      };
-      row.append(pick, fav);
-      list.append(row);
-    }
-  };
-  addGroup("Favorites", matches.filter((m) => favs.has(m.id)));
-  addGroup("All models", matches.filter((m) => !favs.has(m.id)));
-  if (!matches.length) {
-    const empty = document.createElement("div");
-    empty.className = "agent-model-empty";
-    empty.textContent = visionModels.length ? `No vision models match “${query}”.` : "No models loaded yet.";
-    list.append(empty);
-  }
-  $("agent-model-count").textContent = `${visionModels.length} vision models`;
-}
-
-function setModelDropdown(open) {
-  const dropdown = $("agent-model-dropdown");
-  dropdown.classList.toggle("hidden", !open);
-  $("agent-model-button").setAttribute("aria-expanded", String(open));
-  if (open) {
-    renderModelList();
-    $("agent-model-search").focus();
-  }
+  const firstFav = visionModels.find((m) => favs.has(m.id));
+  if (firstFav) return firstFav.id;
+  const sonnet = visionModels.find((m) => m.id.includes("claude-sonnet"));
+  if (sonnet) return sonnet.id;
+  return visionModels[0]?.id || "";
 }
 
 // ---------- provider bar ----------
@@ -1440,7 +1245,6 @@ function updateProviderUi() {
 }
 
 async function loadModels() {
-  const select = $("agent-model");
   const status = $("agent-model-state");
   status.textContent = "Loading models…";
   try {
@@ -1452,108 +1256,117 @@ async function loadModels() {
     visionModels = (data || [])
       .filter(isVisionModel)
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
-    select.replaceChildren();
-    for (const model of visionModels) {
-      const option = document.createElement("option");
-      option.value = model.id;
-      option.textContent = `${model.name || model.id} · ${modelPriceText(model)}`;
-      select.append(option);
-    }
-    const stored = localStorage.getItem(MODEL_STORAGE);
-    const favs = loadFavorites();
-    const firstFav = visionModels.find((m) => favs.has(m.id));
-    if (stored && visionModels.some((m) => m.id === stored)) select.value = stored;
-    else if (firstFav) select.value = firstFav.id;
-    else {
-      const sonnet = visionModels.find((m) => m.id.includes("claude-sonnet"));
-      if (sonnet) select.value = sonnet.id;
-    }
-    if (select.value) localStorage.setItem(MODEL_STORAGE, select.value);
     modelsLoadOk = true;
     status.textContent = `${visionModels.length} vision models`;
   } catch (error) {
     modelsLoadOk = false;
     status.textContent = `Could not load models: ${error.message}`;
   }
-  syncModelButton();
-  renderModelList();
+  for (const win of agentWindows) win.refreshModelUi();
   updateProviderUi();
 }
 
-async function streamChat(messages) {
-  const response = await fetch(`${API_BASE}/chat/completions`, {
-    method: "POST",
-    signal: aborter.signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey()}`,
-      "X-Title": "Yello Studio",
-    },
-    body: JSON.stringify({
-      model: $("agent-model").value,
-      messages,
-      tools: availableTools(),
-      stream: true,
-      usage: { include: true },
-      ...(reasoningEffort() !== "off" ? { reasoning: { effort: reasoningEffort() } } : {}),
-    }),
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.error?.message || `OpenRouter returned ${response.status}`);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let content = "";
-  let reasoning = "";
-  let usage = null;
-  const toolCalls = new Map();
-  let turn = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop();
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const data = trimmed.slice(5).trim();
-      if (data === "[DONE]") continue;
-      let chunk;
-      try {
-        chunk = JSON.parse(data);
-      } catch {
-        continue;
-      }
-      if (chunk.usage) usage = chunk.usage;
-      const delta = chunk.choices?.[0]?.delta || {};
-      const reasoningDelta = delta.reasoning || delta.reasoning_content || "";
-      if (reasoningDelta) {
-        reasoning += reasoningDelta;
-        if (!turn) turn = addAssistantTurn();
-        turn.setThinking(reasoning);
-        $("agent-messages").scrollTop = $("agent-messages").scrollHeight;
-      }
-      if (delta.content) {
-        content += delta.content;
-        if (!turn) turn = addAssistantTurn();
-        turn.setContent(content);
-        $("agent-messages").scrollTop = $("agent-messages").scrollHeight;
-      }
-      for (const call of delta.tool_calls || []) {
-        const entry = toolCalls.get(call.index) || { id: "", name: "", arguments: "" };
-        if (call.id) entry.id = call.id;
-        if (call.function?.name) entry.name = call.function.name;
-        if (call.function?.arguments) entry.arguments += call.function.arguments;
-        toolCalls.set(call.index, entry);
-      }
-    }
-  }
-  if (turn) turn.finish();
-  return { content, reasoning, toolCalls: [...toolCalls.values()], usage };
+// ---------- agent windows ----------
+// Every chat card is an independent agent window: its own conversation,
+// model choice and stream. Window #1 is the primary one — it lives in the
+// Agent page / dock panel and owns the "restore last chat" pointer. Extra
+// windows float over the Studio and are spawned on demand.
+
+const agentWindows = new Set();
+const MAX_AGENT_WINDOWS = 4;
+const WIN_GEO_KEY = "yello-agent-win-geos";
+
+const CHAT_CARD_HTML = `
+      <div class="agent-chat-head">
+        <span class="agent-chat-title">Chat</span>
+        <span class="agent-head-tools">
+          <button type="button" class="assign-button agent-new-button aw-new" title="Open another agent window">New window</button>
+          <button type="button" class="assign-button agent-history-button aw-history">History</button>
+          <button type="button" class="icon-button agent-dev-button aw-dev" title="Dev mode: show tool calls and model thinking" aria-label="Toggle dev mode" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-wrench"></use></svg></button>
+        </span>
+      </div>
+      <div class="agent-context-graph aw-context-graph">
+        <div class="agent-context-bar aw-context-bar"></div>
+        <div class="agent-context-legend aw-context-legend"></div>
+      </div>
+      <div class="agent-history hidden aw-history-view">
+        <div class="agent-history-head">
+          <span class="agent-chat-title">Previous conversations</span>
+          <button type="button" class="assign-button agent-history-button aw-history-close">Back to chat</button>
+        </div>
+        <div class="agent-history-list aw-history-list"></div>
+      </div>
+      <details class="thinking system-prompt aw-sysprompt">
+        <summary>System prompt</summary>
+        <div class="thinking-body aw-sysprompt-body"></div>
+      </details>
+      <details class="thinking system-prompt aw-tools-prompt">
+        <summary class="aw-tools-summary">Tools</summary>
+        <div class="thinking-body aw-tools-body"></div>
+      </details>
+      <div class="agent-messages aw-messages"></div>
+      <div class="agent-composer">
+        <textarea class="aw-input" rows="1" placeholder="Ask the agent to change the design…"></textarea>
+        <div class="agent-composer-row">
+          <button type="button" class="agent-clear-button aw-clear" title="Start a new chat">Clear</button>
+          <span class="agent-composer-spacer"></span>
+          <button type="button" class="agent-stop-button hidden aw-stop">Stop</button>
+          <button type="button" class="agent-send-button aw-send" title="Send (Enter)" aria-label="Send"><svg class="ic" aria-hidden="true"><use href="#i-send"></use></svg></button>
+        </div>
+      </div>
+      <div class="agent-statusbar">
+        <div class="agent-model-picker">
+          <button type="button" class="agent-model-button aw-model-button" aria-haspopup="listbox" aria-expanded="false" title="Choose a model">
+            <span class="agent-model-label aw-model-label">Loading models…</span>
+            <svg class="ic" aria-hidden="true"><use href="#i-chev-down"></use></svg>
+          </button>
+          <div class="agent-model-dropdown hidden aw-model-dropdown" role="listbox" aria-label="Models">
+            <div class="agent-model-search">
+              <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
+              <input class="aw-model-search" type="text" placeholder="Search models…" autocomplete="off">
+            </div>
+            <div class="agent-model-list aw-model-list"></div>
+            <div class="agent-model-foot"><span class="aw-model-count"></span><span>Vision models only</span></div>
+          </div>
+        </div>
+        <label class="agent-reasoning-wrap" title="Thinking level — reasoning effort sent to the model (for models that support it)">
+          <span>Thinking</span>
+          <select class="agent-reasoning-select aw-reasoning">
+            <option value="off">Off</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+        <span class="agent-usage aw-usage" title="Session token usage"></span>
+      </div>`;
+
+// Pointer-drag helper: drag with move/up listeners on the window.
+function startDrag(event, onMove, onDone) {
+  event.preventDefault();
+  const move = (ev) => onMove(ev);
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (onDone) onDone();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
 }
+
+// ---------- Dev-mode context graph ----------
+// A stacked bar estimating what the next request's context is made of:
+// system prompt, tool definitions, model thinking, tool calls/results,
+// images, and plain text. Text is estimated at chars/4; images at a flat
+// ~258 tokens each (their real vision cost, not their data-URL length).
+const CONTEXT_SEGMENTS = [
+  { key: "system", label: "System", color: "#6b9cff" },
+  { key: "tools", label: "Tools", color: "#b388ff" },
+  { key: "thinking", label: "Thinking", color: "#4dd0e1" },
+  { key: "toolcalls", label: "Tool calls", color: "#f2c94c" },
+  { key: "images", label: "Images", color: "#f48fb1" },
+  { key: "text", label: "Text", color: "#8a93a5" },
+];
 
 /** Only the newest view_screen image is worth its tokens on later rounds:
  *  once a newer render exists, older ones collapse to their caption. */
@@ -1580,373 +1393,928 @@ function sanitizeMessage(message) {
   return clean;
 }
 
-function compactedHistory() {
-  return collapseOldImages(conversation).map(sanitizeMessage);
-}
+function createAgentWindow(cardEl, { primary = false } = {}) {
+  const q = (sel) => cardEl.querySelector(sel);
+  const el = {
+    messages: q(".aw-messages"),
+    input: q(".aw-input"),
+    send: q(".aw-send"),
+    stop: q(".aw-stop"),
+    clear: q(".aw-clear"),
+    historyBtn: q(".aw-history"),
+    historyView: q(".aw-history-view"),
+    historyClose: q(".aw-history-close"),
+    historyList: q(".aw-history-list"),
+    devBtn: q(".aw-dev"),
+    contextBar: q(".aw-context-bar"),
+    contextLegend: q(".aw-context-legend"),
+    sysPrompt: q(".aw-sysprompt"),
+    sysBody: q(".aw-sysprompt-body"),
+    toolsPrompt: q(".aw-tools-prompt"),
+    toolsSummary: q(".aw-tools-summary"),
+    toolsBody: q(".aw-tools-body"),
+    modelButton: q(".aw-model-button"),
+    modelLabel: q(".aw-model-label"),
+    modelDropdown: q(".aw-model-dropdown"),
+    modelSearch: q(".aw-model-search"),
+    modelList: q(".aw-model-list"),
+    modelCount: q(".aw-model-count"),
+    reasoning: q(".aw-reasoning"),
+    usage: q(".aw-usage"),
+    composer: q(".agent-composer"),
+    statusbar: q(".agent-statusbar"),
+    newBtn: q(".aw-new"),
+  };
 
-// ---------- conversation persistence (IndexedDB) ----------
+  const win = {
+    root: cardEl,
+    el,
+    primary,
+    conversation: [],
+    usageTotals: { in: 0, out: 0, cost: 0 },
+    currentChatId: null,
+    currentChatCreatedAt: 0,
+    sending: false,
+    aborter: null,
+    epoch: 0,
+    openToolGroup: null,
+    modelId: "",
+    devOn: localStorage.getItem("yello-agent-dev") === "1",
+    refreshModelUi,
+    greet,
+    loadChatById,
+  };
+  agentWindows.add(win);
 
-let currentChatId = null;
-let currentChatCreatedAt = 0;
+  // ----- transcript rendering -----
 
-function chatTitle() {
-  const first = conversation.find((m) => m.role === "user" && typeof m.content === "string" && !m._context);
-  const text = first?.content.trim().replace(/\s+/g, " ") || "";
-  return text ? text.slice(0, 70) : "Chat";
-}
-
-/** Save the current conversation (fire-and-forget; storage failures are
- *  non-fatal — the chat keeps working in memory). */
-function persistChat() {
-  if (!conversation.some((m) => m.role === "user")) return;
-  const now = Date.now();
-  if (!currentChatId) {
-    currentChatId = `chat-${now}-${Math.random().toString(36).slice(2, 8)}`;
-    currentChatCreatedAt = now;
+  function closeToolGroup() {
+    win.openToolGroup = null;
   }
-  localStorage.setItem(ACTIVE_CHAT_KEY, currentChatId);
-  saveChat({
-    id: currentChatId,
-    title: chatTitle(),
-    createdAt: currentChatCreatedAt,
-    updatedAt: now,
-    model: localStorage.getItem(MODEL_STORAGE) || "",
-    designId: S.currentDesignId || "",
-    designName: S.layout?.name || "",
-    usage: { ...usageTotals },
-    messages: collapseOldImages(conversation),
-  }).catch(() => {});
-}
 
-function startNewChat() {
-  // Clear really starts a new conversation: stop any in-flight reply,
-  // invalidate its pending persist, and remember that the fresh chat is
-  // the current one so a reload does not resurrect the previous chat.
-  chatEpoch += 1;
-  if (aborter) aborter.abort();
-  localStorage.setItem(ACTIVE_CHAT_KEY, "new");
-  conversation.length = 0;
-  currentChatId = null;
-  currentChatCreatedAt = 0;
-  usageTotals.in = 0;
-  usageTotals.out = 0;
-  usageTotals.cost = 0;
-  renderUsage();
-  $("agent-messages").replaceChildren();
-  greet();
-}
+  function addMessage(role, text = "") {
+    // Never render an empty assistant bubble.
+    if (role === "assistant" && !text.trim()) return null;
+    closeToolGroup();
+    const node = document.createElement("div");
+    node.className = `msg ${role}`;
+    node.innerHTML = role === "assistant" ? renderMarkdown(text) : escapeHtml(text).replace(/\n/g, "<br>");
+    el.messages.append(node);
+    el.messages.scrollTop = el.messages.scrollHeight;
+    return node;
+  }
 
-/** Rebuild the chat DOM from a stored message list. */
-function renderConversationDom() {
-  closeToolGroup();
-  const box = $("agent-messages");
-  box.replaceChildren();
-  for (let i = 0; i < conversation.length; i += 1) {
-    const message = conversation[i];
-    if (message._context) continue;
-    if (message.role === "user" && typeof message.content === "string") {
-      addMessage("user", message.content);
-    } else if (message.role === "user" && Array.isArray(message.content)) {
-      closeToolGroup();
-      const caption = message.content.find((p) => p.type === "text")?.text || "Rendered view:";
-      const image = message.content.find((p) => p.type === "image_url")?.image_url?.url;
-      const row = document.createElement("div");
-      row.className = "msg-row";
-      const note = document.createElement("div");
-      note.className = "msg view-note";
-      note.textContent = caption;
-      row.append(note);
-      if (image) {
-        const img = document.createElement("img");
-        img.className = "tool-thumb";
-        img.src = image;
-        img.alt = "Rendered screen view";
-        row.append(img);
-      }
-      box.append(row);
-    } else if (message.role === "assistant") {
-      if (message.content || message._reasoning) {
-        const turn = addAssistantTurn();
-        if (message._reasoning) turn.setThinking(message._reasoning);
-        if (message.content) turn.setContent(message.content);
-        turn.finish();
-      }
-      for (const call of message.tool_calls || []) {
-        const toolMessage = conversation
-          .slice(i + 1)
-          .find((m) => m.role === "tool" && m.tool_call_id === call.id);
-        const entry = addToolEntry(call.function.name, call.function.arguments);
-        let parsed = {};
-        try {
-          parsed = JSON.parse(toolMessage?.content || "{}");
-        } catch {
-          parsed = { result: toolMessage?.content || "" };
+  function currentToolGroup() {
+    if (win.openToolGroup && win.openToolGroup.group.isConnected && el.messages.lastElementChild === win.openToolGroup.group) {
+      return win.openToolGroup;
+    }
+    const group = document.createElement("div");
+    group.className = "tool-group";
+    const chips = document.createElement("div");
+    chips.className = "tool-chips";
+    const bodies = document.createElement("div");
+    bodies.className = "tool-bodies";
+    group.append(chips, bodies);
+    el.messages.append(group);
+    win.openToolGroup = { group, chips, bodies };
+    return win.openToolGroup;
+  }
+
+  // One tool call in the transcript: a chip in the current group's chip
+  // row; in dev mode the arguments and result JSON show underneath.
+  function addToolEntry(name, argsJson) {
+    const group = currentToolGroup();
+    const chip = document.createElement("div");
+    chip.className = "tool-chip";
+    chip.textContent = `… ${name}`;
+    group.chips.append(chip);
+    const body = document.createElement("div");
+    body.className = "tool-body";
+    const args = makeJsonBlock();
+    let parsedArgs = argsJson || "{}";
+    try {
+      parsedArgs = JSON.parse(argsJson || "{}");
+    } catch { /* keep raw */ }
+    args.set(parsedArgs);
+    const result = makeJsonBlock();
+    body.append(args.wrap, result.wrap);
+    group.bodies.append(body);
+    el.messages.scrollTop = el.messages.scrollHeight;
+    return {
+      finish(resultObj, ok, imageUrl) {
+        chip.textContent = `${ok ? "✓" : "✕"} ${name}`;
+        chip.classList.add(ok ? "tool-ok" : "tool-fail");
+        if (!ok) body.classList.add("tool-fail");
+        result.set(resultObj);
+        if (imageUrl) {
+          const img = document.createElement("img");
+          img.className = "tool-thumb";
+          img.src = imageUrl;
+          img.alt = "Rendered screen view";
+          body.append(img);
+          el.messages.scrollTop = el.messages.scrollHeight;
         }
-        const failed = Boolean(parsed && (parsed.error || parsed.applied === false || parsed.valid === false));
-        entry.finish(parsed, !failed);
-      }
-    }
+      },
+    };
   }
-  box.scrollTop = box.scrollHeight;
-}
 
-function loadChat(record) {
-  localStorage.setItem(ACTIVE_CHAT_KEY, record.id);
-  conversation.length = 0;
-  for (const message of record.messages || []) conversation.push(message);
-  currentChatId = record.id;
-  currentChatCreatedAt = record.createdAt || Date.now();
-  usageTotals.in = record.usage?.in || 0;
-  usageTotals.out = record.usage?.out || 0;
-  usageTotals.cost = record.usage?.cost || 0;
-  renderUsage();
-  renderConversationDom();
-  setHistoryOpen(false);
-}
-
-async function restoreLastChat() {
-  const active = localStorage.getItem(ACTIVE_CHAT_KEY);
-  if (active === "new") {
-    greet();
-    return;
-  }
-  try {
-    if (active) {
-      const record = await getChat(active);
-      if (record && (record.messages || []).length) {
-        loadChat(record);
-        return;
-      }
-    }
-    const chats = await listChats();
-    if (chats.length) {
-      const record = await getChat(chats[0].id);
-      if (record && (record.messages || []).length) {
-        loadChat(record);
-        return;
-      }
-    }
-  } catch { /* storage unavailable — fall through to a fresh chat */ }
-  greet();
-}
-
-// ---------- history view ----------
-
-function setHistoryOpen(open) {
-  $("agent-history-view").classList.toggle("hidden", !open);
-  $("agent-system-prompt")?.classList.toggle("hidden", open);
-  $("agent-tools-prompt")?.classList.toggle("hidden", open);
-  $("agent-messages").classList.toggle("hidden", open);
-  document.querySelector("#agent-chat-card .agent-composer")?.classList.toggle("hidden", open);
-  document.querySelector("#agent-chat-card .agent-statusbar")?.classList.toggle("hidden", open);
-  if (open) renderHistoryList();
-}
-
-async function renderHistoryList() {
-  const list = $("agent-history-list");
-  list.replaceChildren();
-  const chats = await listChats().catch(() => []);
-  if (!chats.length) {
-    const empty = document.createElement("p");
-    empty.className = "subtle";
-    empty.textContent = "No saved conversations yet.";
-    list.append(empty);
-    return;
-  }
-  for (const chat of chats) {
+  // An assistant turn: an optional thinking block (dev mode only) above
+  // the streamed bubble. The bubble stays out of the DOM until the turn
+  // actually has text — tool-only and thinking-only rounds must not leave
+  // an empty assistant pill behind. setContent("") removes it again.
+  function addAssistantTurn() {
+    closeToolGroup();
     const row = document.createElement("div");
-    row.className = "history-row";
-    const main = document.createElement("div");
-    main.className = "history-main";
-    const title = document.createElement("div");
-    title.className = "history-title";
-    title.textContent = chat.title + (chat.id === currentChatId ? " (current)" : "");
-    const meta = document.createElement("div");
-    meta.className = "history-meta";
-    const when = new Date(chat.updatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-    const bits = [when, chat.messageCount + " messages"];
-    if (chat.designName) bits.push(`design “${chat.designName}”`);
-    if (chat.model) bits.push(chat.model.split("/").pop());
-    if (chat.usage?.in || chat.usage?.out) bits.push(`${fmtTokens(chat.usage.in)} in · ${fmtTokens(chat.usage.out)} out`);
-    meta.textContent = bits.join(" · ");
-    main.append(title, meta);
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "assign-button";
-    openButton.textContent = "Open";
-    openButton.onclick = async () => {
-      const record = await getChat(chat.id).catch(() => null);
-      if (record) loadChat(record);
-    };
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "danger-button";
-    deleteButton.textContent = "Delete";
-    deleteButton.onclick = async () => {
-      const confirmed = await appConfirm({
-        title: "Delete conversation?",
-        message: `“${chat.title}” will be removed from this browser's history.`,
-        confirmLabel: "Delete",
-      });
-      if (!confirmed) return;
-      await deleteChat(chat.id).catch(() => {});
-      if (chat.id === currentChatId) startNewChat();
-      renderHistoryList();
-    };
-    row.append(main, openButton, deleteButton);
-    list.append(row);
-  }
-}
-
-function fmtTokens(n) {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0);
-}
-
-/** Seed a fresh conversation with the current design: its full Design JSON
- *  plus a render of the active page (a 320x240 screenshot costs roughly
- *  100-260 vision tokens depending on the provider — cheap next to the
- *  fixed prompt overhead). Both are marked _context so the transcript never
- *  renders them as user bubbles; sanitizeMessage strips the flag before
- *  anything goes to the API, and the usual image collapsing applies. */
-async function seedStartContext() {
-  if (!S.layout) return;
-  conversation.push({
-    role: "user",
-    _context: true,
-    content: `Starting context: my design "${S.layout.name || S.currentDesignId}" (id ${S.currentDesignId}) is open in the editor${S.dirty ? " with unsaved changes" : ""}. Here is its full Design JSON right now — work from this copy instead of calling get_current_design first:\n\n${JSON.stringify(S.layout)}`,
-  });
-  try {
-    const view = await toolViewScreen({});
-    if (view?.image) {
-      conversation.push({
-        role: "user",
-        _context: true,
-        content: [
-          { type: "text", text: `Starting context: ${view.imageCaption || "a render of the design's active page, rendered just now:"}` },
-          { type: "image_url", image_url: { url: view.image } },
-        ],
-      });
-    }
-  } catch {
-    // The render is a bonus; the JSON seed still stands.
-  }
-}
-
-async function sendAgentMessage() {
-  const input = $("agent-input");
-  const text = input.value.trim();
-  if (!text || sending) return;
-  if (!apiKey()) {
-    addMessage("assistant", "Add your OpenRouter API key first — tap the gear on the OpenRouter bar above. It stays in this browser and is only sent to OpenRouter.");
-    return;
-  }
-  if (!$("agent-model").value) {
-    addMessage("assistant", "Pick a model first (the list loads from OpenRouter).");
-    return;
-  }
-  localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
-  renderToolsList();
-  input.value = "";
-  input.style.height = "auto";
-  const epoch = chatEpoch;
-  sending = true;
-  $("agent-send").disabled = true;
-  $("agent-stop").classList.remove("hidden");
-  aborter = new AbortController();
-  if (conversation.length === 0) await seedStartContext();
-  addMessage("user", text);
-  conversation.push({ role: "user", content: text });
-  try {
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-      let contextText = `Current context: design "${S.layout?.name || S.currentDesignId}" (id ${S.currentDesignId}) is open in the editor${S.dirty ? " with unsaved changes" : ""}. ${S.studio.screens.length} screen(s) known, ${S.studio.screens.filter((s) => s.connected).length} connected.`;
-      const entities = S.homeAssistant?.entities || [];
-      if (entities.length) {
-        const list = entities.slice(0, 80).map((e) => `${e.entityId} = ${e.state}${e.unit ? ` ${e.unit}` : ""}`).join("; ");
-        contextText += ` Home Assistant entities: ${list}${entities.length > 80 ? " (list truncated)" : ""}.`;
-      }
-      const context = { role: "system", content: contextText };
-      const { content, reasoning, toolCalls, usage } = await streamChat([
-        { role: "system", content: SYSTEM_PROMPT },
-        context,
-        ...compactedHistory(),
-      ]);
-      if (usage) {
-        usageTotals.in += usage.prompt_tokens || 0;
-        usageTotals.out += usage.completion_tokens || 0;
-        usageTotals.cost += usage.cost || 0;
-        renderUsage();
-      }
-      const assistantMessage = { role: "assistant", content: content && content.trim() ? content : null };
-      if (reasoning) assistantMessage._reasoning = reasoning;
-      if (toolCalls.length) {
-        assistantMessage.tool_calls = toolCalls.map((call) => ({
-          id: call.id,
-          type: "function",
-          function: { name: call.name, arguments: call.arguments },
-        }));
-      }
-      conversation.push(assistantMessage);
-      if (!toolCalls.length) break;
-      for (const call of toolCalls) {
-        const entry = addToolEntry(call.name, call.arguments);
-        const result = await runTool(call.name, call.arguments);
-        const failed = Boolean(result && (result.error || result.applied === false || result.valid === false));
-        // A view_screen result carries a rendered image: keep it out of the
-        // text tool result and attach it as a vision input right after.
-        const image = result?.image;
-        const caption = result?.imageCaption;
-        const textResult = image ? { ...result } : result;
-        if (textResult) {
-          delete textResult.image;
-          delete textResult.imageCaption;
+    row.className = "msg-row";
+    const thinking = document.createElement("details");
+    thinking.className = "thinking";
+    const summary = document.createElement("summary");
+    summary.textContent = "Thinking";
+    const thinkingBody = document.createElement("div");
+    thinkingBody.className = "thinking-body";
+    thinking.append(summary, thinkingBody);
+    const bubble = document.createElement("div");
+    bubble.className = "msg assistant";
+    el.messages.append(row);
+    el.messages.scrollTop = el.messages.scrollHeight;
+    return {
+      bubble,
+      thinkingBody,
+      row,
+      setThinking(text) {
+        if (!text || !text.trim()) return;
+        if (!thinking.isConnected) row.insertBefore(thinking, bubble.isConnected ? bubble : null);
+        thinkingBody.textContent = text;
+      },
+      setContent(text) {
+        // Whitespace-only text must never surface as an empty bubble.
+        if (text && text.trim()) {
+          if (!bubble.isConnected) row.append(bubble);
+          bubble.innerHTML = renderMarkdown(text);
+        } else {
+          bubble.remove();
         }
-        entry.finish(textResult, !failed, image);
-        conversation.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: JSON.stringify(textResult).slice(0, 60000),
+      },
+      /** Drop the whole row if the turn produced neither text nor thinking. */
+      finish() {
+        if (!bubble.isConnected && !thinking.isConnected) row.remove();
+      },
+    };
+  }
+
+  // ----- context graph + usage -----
+
+  function renderContextGraph() {
+    const bar = el.contextBar;
+    const legend = el.contextLegend;
+    if (!bar || !legend) return;
+    const est = (chars) => Math.ceil(chars / 4);
+    const seg = {
+      system: est(SYSTEM_PROMPT.length),
+      tools: est(JSON.stringify(availableTools()).length),
+      thinking: 0,
+      toolcalls: 0,
+      images: 0,
+      text: 0,
+    };
+    for (const message of win.conversation) {
+      if (message._reasoning) seg.thinking += est(String(message._reasoning).length);
+      if (message.role === "tool") {
+        seg.toolcalls += est(String(message.content ?? "").length);
+        continue;
+      }
+      if (Array.isArray(message.tool_calls)) {
+        for (const call of message.tool_calls) {
+          seg.toolcalls += est((call.function?.name || "").length + (call.function?.arguments || "").length);
+        }
+      }
+      if (typeof message.content === "string") {
+        seg.text += est(message.content.length);
+      } else if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type === "text") seg.text += est(part.text.length);
+          else if (part.type === "image_url") seg.images += 258;
+        }
+      }
+    }
+    const total = Object.values(seg).reduce((sum, n) => sum + n, 0);
+    bar.replaceChildren();
+    legend.replaceChildren();
+    for (const { key, label, color } of CONTEXT_SEGMENTS) {
+      const tokens = seg[key];
+      if (total > 0 && tokens > 0) {
+        const slice = document.createElement("span");
+        slice.style.width = `${(tokens / total) * 100}%`;
+        slice.style.background = color;
+        slice.title = `${label}: ≈${tokens.toLocaleString("en-US")} tokens`;
+        bar.append(slice);
+      }
+      const item = document.createElement("span");
+      item.className = "agent-context-item";
+      const dot = document.createElement("span");
+      dot.className = "agent-context-dot";
+      dot.style.background = color;
+      item.append(dot, `${label} ≈${tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : tokens}`);
+      legend.append(item);
+    }
+  }
+
+  function renderUsage() {
+    renderContextGraph();
+    if (!win.usageTotals.in && !win.usageTotals.out) {
+      el.usage.textContent = "";
+      return;
+    }
+    const fmt = (n) => n.toLocaleString("en-US");
+    el.usage.textContent = `${fmt(win.usageTotals.in)} in · ${fmt(win.usageTotals.out)} out` +
+      (win.usageTotals.cost ? ` · $${win.usageTotals.cost.toFixed(4)}` : "");
+  }
+
+  // ----- model picker (per window; the model list itself is shared) -----
+
+  function syncModelButton() {
+    const model = modelById(win.modelId);
+    el.modelLabel.textContent = model ? (model.name || model.id) : "Select a model";
+    el.modelButton.title = model ? model.id : "Choose a model";
+  }
+
+  function selectModel(id) {
+    if (!visionModels.some((m) => m.id === id)) return;
+    win.modelId = id;
+    localStorage.setItem(MODEL_STORAGE, id);
+    syncModelButton();
+    renderModelList();
+  }
+
+  function renderModelList() {
+    const list = el.modelList;
+    if (!list) return;
+    const query = (el.modelSearch.value || "").trim().toLowerCase();
+    const favs = loadFavorites();
+    const matches = visionModels.filter((m) => !query || `${m.name || ""} ${m.id}`.toLowerCase().includes(query));
+    list.replaceChildren();
+    const addGroup = (title, models) => {
+      if (!models.length) return;
+      const head = document.createElement("div");
+      head.className = "agent-model-group";
+      head.textContent = title;
+      list.append(head);
+      for (const model of models) {
+        const row = document.createElement("div");
+        row.className = `agent-model-row${model.id === win.modelId ? " selected" : ""}`;
+        const pick = document.createElement("button");
+        pick.type = "button";
+        pick.className = "agent-model-pick";
+        pick.setAttribute("role", "option");
+        pick.setAttribute("aria-selected", String(model.id === win.modelId));
+        const name = document.createElement("span");
+        name.className = "agent-model-name";
+        name.textContent = model.name || model.id;
+        const meta = document.createElement("span");
+        meta.className = "agent-model-meta";
+        meta.textContent = modelMetaText(model);
+        pick.append(name, meta);
+        pick.onclick = () => {
+          selectModel(model.id);
+          setModelDropdown(false);
+        };
+        const fav = document.createElement("button");
+        fav.type = "button";
+        fav.className = `agent-model-fav${favs.has(model.id) ? " is-fav" : ""}`;
+        fav.title = favs.has(model.id) ? "Remove from favorites" : "Add to favorites";
+        fav.setAttribute("aria-label", fav.title);
+        fav.setAttribute("aria-pressed", String(favs.has(model.id)));
+        fav.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-star"></use></svg>';
+        fav.onclick = () => {
+          const next = loadFavorites();
+          if (next.has(model.id)) next.delete(model.id);
+          else next.add(model.id);
+          saveFavorites(next);
+          renderModelList();
+        };
+        row.append(pick, fav);
+        list.append(row);
+      }
+    };
+    addGroup("Favorites", matches.filter((m) => favs.has(m.id)));
+    addGroup("All models", matches.filter((m) => !favs.has(m.id)));
+    if (!matches.length) {
+      const empty = document.createElement("div");
+      empty.className = "agent-model-empty";
+      empty.textContent = visionModels.length ? `No vision models match “${query}”.` : "No models loaded yet.";
+      list.append(empty);
+    }
+    el.modelCount.textContent = `${visionModels.length} vision models`;
+  }
+
+  function setModelDropdown(open) {
+    el.modelDropdown.classList.toggle("hidden", !open);
+    el.modelButton.setAttribute("aria-expanded", String(open));
+    if (open) {
+      renderModelList();
+      el.modelSearch.focus();
+    }
+  }
+
+  function refreshModelUi() {
+    if (!win.modelId || !visionModels.some((m) => m.id === win.modelId)) {
+      win.modelId = defaultModelId();
+    }
+    syncModelButton();
+    renderModelList();
+  }
+
+  // ----- conversation persistence (IndexedDB) -----
+
+  function chatTitle() {
+    const first = win.conversation.find((m) => m.role === "user" && typeof m.content === "string" && !m._context);
+    const text = first?.content.trim().replace(/\s+/g, " ") || "";
+    return text ? text.slice(0, 70) : "Chat";
+  }
+
+  /** Save this window's conversation (fire-and-forget; storage failures
+   *  are non-fatal — the chat keeps working in memory). Only the primary
+   *  window owns the "restore on reload" pointer. */
+  function persistChat() {
+    if (!win.conversation.some((m) => m.role === "user")) return;
+    const now = Date.now();
+    if (!win.currentChatId) {
+      win.currentChatId = `chat-${now}-${Math.random().toString(36).slice(2, 8)}`;
+      win.currentChatCreatedAt = now;
+    }
+    if (win.primary) localStorage.setItem(ACTIVE_CHAT_KEY, win.currentChatId);
+    saveChat({
+      id: win.currentChatId,
+      title: chatTitle(),
+      createdAt: win.currentChatCreatedAt,
+      updatedAt: now,
+      model: win.modelId || "",
+      designId: S.currentDesignId || "",
+      designName: S.layout?.name || "",
+      usage: { ...win.usageTotals },
+      messages: collapseOldImages(win.conversation),
+    }).catch(() => {});
+  }
+
+  function startNewChat() {
+    // Clear really starts a new conversation: stop any in-flight reply,
+    // invalidate its pending persist, and (for the primary window)
+    // remember that the fresh chat is the current one so a reload does
+    // not resurrect the previous chat.
+    win.epoch += 1;
+    if (win.aborter) win.aborter.abort();
+    if (win.primary) localStorage.setItem(ACTIVE_CHAT_KEY, "new");
+    win.conversation.length = 0;
+    win.currentChatId = null;
+    win.currentChatCreatedAt = 0;
+    win.usageTotals.in = 0;
+    win.usageTotals.out = 0;
+    win.usageTotals.cost = 0;
+    renderUsage();
+    el.messages.replaceChildren();
+    greet();
+  }
+
+  /** Rebuild the chat DOM from this window's stored message list. */
+  function renderConversationDom() {
+    closeToolGroup();
+    el.messages.replaceChildren();
+    for (let i = 0; i < win.conversation.length; i += 1) {
+      const message = win.conversation[i];
+      if (message._context) continue;
+      if (message.role === "user" && typeof message.content === "string") {
+        addMessage("user", message.content);
+      } else if (message.role === "user" && Array.isArray(message.content)) {
+        closeToolGroup();
+        const caption = message.content.find((p) => p.type === "text")?.text || "Rendered view:";
+        const image = message.content.find((p) => p.type === "image_url")?.image_url?.url;
+        const row = document.createElement("div");
+        row.className = "msg-row";
+        const note = document.createElement("div");
+        note.className = "msg view-note";
+        note.textContent = caption;
+        row.append(note);
+        if (image) {
+          const img = document.createElement("img");
+          img.className = "tool-thumb";
+          img.src = image;
+          img.alt = "Rendered screen view";
+          row.append(img);
+        }
+        el.messages.append(row);
+      } else if (message.role === "assistant") {
+        if (message.content || message._reasoning) {
+          const turn = addAssistantTurn();
+          if (message._reasoning) turn.setThinking(message._reasoning);
+          if (message.content) turn.setContent(message.content);
+          turn.finish();
+        }
+        for (const call of message.tool_calls || []) {
+          const toolMessage = win.conversation
+            .slice(i + 1)
+            .find((m) => m.role === "tool" && m.tool_call_id === call.id);
+          const entry = addToolEntry(call.function.name, call.function.arguments);
+          let parsed = {};
+          try {
+            parsed = JSON.parse(toolMessage?.content || "{}");
+          } catch {
+            parsed = { result: toolMessage?.content || "" };
+          }
+          const failed = Boolean(parsed && (parsed.error || parsed.applied === false || parsed.valid === false));
+          entry.finish(parsed, !failed);
+        }
+      }
+    }
+    el.messages.scrollTop = el.messages.scrollHeight;
+  }
+
+  function loadChat(record) {
+    if (win.primary) localStorage.setItem(ACTIVE_CHAT_KEY, record.id);
+    win.conversation.length = 0;
+    for (const message of record.messages || []) win.conversation.push(message);
+    win.currentChatId = record.id;
+    win.currentChatCreatedAt = record.createdAt || Date.now();
+    win.usageTotals.in = record.usage?.in || 0;
+    win.usageTotals.out = record.usage?.out || 0;
+    win.usageTotals.cost = record.usage?.cost || 0;
+    renderUsage();
+    renderConversationDom();
+    setHistoryOpen(false);
+  }
+
+  async function loadChatById(id) {
+    const record = await getChat(id).catch(() => null);
+    if (record) loadChat(record);
+    return record;
+  }
+
+  async function restoreLastChat() {
+    const active = localStorage.getItem(ACTIVE_CHAT_KEY);
+    if (active === "new") {
+      greet();
+      return;
+    }
+    try {
+      if (active) {
+        const record = await getChat(active);
+        if (record && (record.messages || []).length) {
+          loadChat(record);
+          return;
+        }
+      }
+      const chats = await listChats();
+      if (chats.length) {
+        const record = await getChat(chats[0].id);
+        if (record && (record.messages || []).length) {
+          loadChat(record);
+          return;
+        }
+      }
+    } catch { /* storage unavailable — fall through to a fresh chat */ }
+    greet();
+  }
+
+  // ----- history view -----
+
+  function setHistoryOpen(open) {
+    el.historyView.classList.toggle("hidden", !open);
+    el.sysPrompt?.classList.toggle("hidden", open);
+    el.toolsPrompt?.classList.toggle("hidden", open);
+    el.messages.classList.toggle("hidden", open);
+    el.composer?.classList.toggle("hidden", open);
+    el.statusbar?.classList.toggle("hidden", open);
+    if (open) renderHistoryList();
+  }
+
+  async function renderHistoryList() {
+    const list = el.historyList;
+    list.replaceChildren();
+    const chats = await listChats().catch(() => []);
+    if (!chats.length) {
+      const empty = document.createElement("p");
+      empty.className = "subtle";
+      empty.textContent = "No saved conversations yet.";
+      list.append(empty);
+      return;
+    }
+    for (const chat of chats) {
+      const row = document.createElement("div");
+      row.className = "history-row";
+      const main = document.createElement("div");
+      main.className = "history-main";
+      const title = document.createElement("div");
+      title.className = "history-title";
+      title.textContent = chat.title + (chat.id === win.currentChatId ? " (current)" : "");
+      const meta = document.createElement("div");
+      meta.className = "history-meta";
+      const when = new Date(chat.updatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+      const bits = [when, chat.messageCount + " messages"];
+      if (chat.designName) bits.push(`design “${chat.designName}”`);
+      if (chat.model) bits.push(chat.model.split("/").pop());
+      if (chat.usage?.in || chat.usage?.out) bits.push(`${fmtTokens(chat.usage.in)} in · ${fmtTokens(chat.usage.out)} out`);
+      meta.textContent = bits.join(" · ");
+      main.append(title, meta);
+      const openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.className = "assign-button";
+      openButton.textContent = "Open";
+      openButton.onclick = () => loadChatById(chat.id);
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "danger-button";
+      deleteButton.textContent = "Delete";
+      deleteButton.onclick = async () => {
+        const confirmed = await appConfirm({
+          title: "Delete conversation?",
+          message: `“${chat.title}” will be removed from this browser's history.`,
+          confirmLabel: "Delete",
         });
-        if (image && !failed) {
-          conversation.push({
-            role: "user",
-            content: [
-              { type: "text", text: caption || "Rendered view:" },
-              { type: "image_url", image_url: { url: image } },
-            ],
-          });
+        if (!confirmed) return;
+        await deleteChat(chat.id).catch(() => {});
+        if (chat.id === win.currentChatId) startNewChat();
+        renderHistoryList();
+      };
+      row.append(main, openButton, deleteButton);
+      list.append(row);
+    }
+  }
+
+  function greet() {
+    addMessage(
+      "assistant",
+      "I can edit the design you have open: add or rearrange elements, restyle, create pages — then save and push it to your screens. Try: “Add a big clock and today's date to the main page.”",
+    );
+  }
+
+  // ----- sending -----
+
+  /** Seed a fresh conversation with the current design: its full Design
+   *  JSON plus a render of the active page. Both are marked _context so
+   *  the transcript never renders them as user bubbles. */
+  async function seedStartContext() {
+    if (!S.layout) return;
+    win.conversation.push({
+      role: "user",
+      _context: true,
+      content: `Starting context: my design "${S.layout.name || S.currentDesignId}" (id ${S.currentDesignId}) is open in the editor${S.dirty ? " with unsaved changes" : ""}. Here is its full Design JSON right now — work from this copy instead of calling get_current_design first:\n\n${JSON.stringify(S.layout)}`,
+    });
+    try {
+      const view = await toolViewScreen({});
+      if (view?.image) {
+        win.conversation.push({
+          role: "user",
+          _context: true,
+          content: [
+            { type: "text", text: `Starting context: ${view.imageCaption || "a render of the design's active page, rendered just now:"}` },
+            { type: "image_url", image_url: { url: view.image } },
+          ],
+        });
+      }
+    } catch {
+      // The render is a bonus; the JSON seed still stands.
+    }
+  }
+
+  function compactedHistory() {
+    return collapseOldImages(win.conversation).map(sanitizeMessage);
+  }
+
+  async function streamChat(messages) {
+    const effort = el.reasoning.value;
+    const response = await fetch(`${API_BASE}/chat/completions`, {
+      method: "POST",
+      signal: win.aborter.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey()}`,
+        "X-Title": "Yello Studio",
+      },
+      body: JSON.stringify({
+        model: win.modelId,
+        messages,
+        tools: availableTools(),
+        stream: true,
+        usage: { include: true },
+        ...(effort && effort !== "off" ? { reasoning: { effort } } : {}),
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error?.message || `OpenRouter returned ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let content = "";
+    let reasoning = "";
+    let usage = null;
+    const toolCalls = new Map();
+    let turn = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const data = trimmed.slice(5).trim();
+        if (data === "[DONE]") continue;
+        let chunk;
+        try {
+          chunk = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (chunk.usage) usage = chunk.usage;
+        const delta = chunk.choices?.[0]?.delta || {};
+        const reasoningDelta = delta.reasoning || delta.reasoning_content || "";
+        if (reasoningDelta) {
+          reasoning += reasoningDelta;
+          if (!turn) turn = addAssistantTurn();
+          turn.setThinking(reasoning);
+          el.messages.scrollTop = el.messages.scrollHeight;
+        }
+        if (delta.content) {
+          content += delta.content;
+          if (!turn) turn = addAssistantTurn();
+          turn.setContent(content);
+          el.messages.scrollTop = el.messages.scrollHeight;
+        }
+        for (const call of delta.tool_calls || []) {
+          const entry = toolCalls.get(call.index) || { id: "", name: "", arguments: "" };
+          if (call.id) entry.id = call.id;
+          if (call.function?.name) entry.name = call.function.name;
+          if (call.function?.arguments) entry.arguments += call.function.arguments;
+          toolCalls.set(call.index, entry);
         }
       }
     }
-    // A Clear mid-flight starts a new conversation: this send's history
-    // belongs to the old one and must not be persisted over it.
-    if (epoch === chatEpoch) persistChat();
-  } catch (error) {
-    if (error.name !== "AbortError" && epoch === chatEpoch) addMessage("assistant", `⚠ ${error.message}`);
-  } finally {
-    sending = false;
-    $("agent-send").disabled = false;
-    $("agent-stop").classList.add("hidden");
-    aborter = null;
+    if (turn) turn.finish();
+    return { content, reasoning, toolCalls: [...toolCalls.values()], usage };
   }
+
+  async function sendAgentMessage() {
+    const text = el.input.value.trim();
+    if (!text || win.sending) return;
+    if (!apiKey()) {
+      addMessage("assistant", "Add your OpenRouter API key first — tap the gear on the OpenRouter bar above. It stays in this browser and is only sent to OpenRouter.");
+      return;
+    }
+    if (!win.modelId) {
+      addMessage("assistant", "Pick a model first (the list loads from OpenRouter).");
+      return;
+    }
+    localStorage.setItem(MODEL_STORAGE, win.modelId);
+    renderToolsList();
+    el.input.value = "";
+    el.input.style.height = "auto";
+    const epoch = win.epoch;
+    win.sending = true;
+    el.send.disabled = true;
+    el.stop.classList.remove("hidden");
+    win.aborter = new AbortController();
+    if (win.conversation.length === 0) await seedStartContext();
+    addMessage("user", text);
+    win.conversation.push({ role: "user", content: text });
+    try {
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+        let contextText = `Current context: design "${S.layout?.name || S.currentDesignId}" (id ${S.currentDesignId}) is open in the editor${S.dirty ? " with unsaved changes" : ""}. ${S.studio.screens.length} screen(s) known, ${S.studio.screens.filter((s) => s.connected).length} connected.`;
+        const entities = S.homeAssistant?.entities || [];
+        if (entities.length) {
+          const list = entities.slice(0, 80).map((e) => `${e.entityId} = ${e.state}${e.unit ? ` ${e.unit}` : ""}`).join("; ");
+          contextText += ` Home Assistant entities: ${list}${entities.length > 80 ? " (list truncated)" : ""}.`;
+        }
+        const context = { role: "system", content: contextText };
+        const { content, reasoning, toolCalls, usage } = await streamChat([
+          { role: "system", content: SYSTEM_PROMPT },
+          context,
+          ...compactedHistory(),
+        ]);
+        if (usage) {
+          win.usageTotals.in += usage.prompt_tokens || 0;
+          win.usageTotals.out += usage.completion_tokens || 0;
+          win.usageTotals.cost += usage.cost || 0;
+          renderUsage();
+        }
+        const assistantMessage = { role: "assistant", content: content && content.trim() ? content : null };
+        if (reasoning) assistantMessage._reasoning = reasoning;
+        if (toolCalls.length) {
+          assistantMessage.tool_calls = toolCalls.map((call) => ({
+            id: call.id,
+            type: "function",
+            function: { name: call.name, arguments: call.arguments },
+          }));
+        }
+        win.conversation.push(assistantMessage);
+        if (!toolCalls.length) break;
+        for (const call of toolCalls) {
+          const entry = addToolEntry(call.name, call.arguments);
+          const result = await runTool(call.name, call.arguments);
+          const failed = Boolean(result && (result.error || result.applied === false || result.valid === false));
+          // A view_screen result carries a rendered image: keep it out of
+          // the text tool result and attach it as a vision input instead.
+          const image = result?.image;
+          const caption = result?.imageCaption;
+          const textResult = image ? { ...result } : result;
+          if (textResult) {
+            delete textResult.image;
+            delete textResult.imageCaption;
+          }
+          entry.finish(textResult, !failed, image);
+          win.conversation.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify(textResult).slice(0, 60000),
+          });
+          if (image && !failed) {
+            win.conversation.push({
+              role: "user",
+              content: [
+                { type: "text", text: caption || "Rendered view:" },
+                { type: "image_url", image_url: { url: image } },
+              ],
+            });
+          }
+        }
+      }
+      // A Clear mid-flight starts a new conversation: this send's history
+      // belongs to the old one and must not be persisted over it.
+      if (epoch === win.epoch) persistChat();
+    } catch (error) {
+      if (error.name !== "AbortError" && epoch === win.epoch) addMessage("assistant", `⚠ ${error.message}`);
+    } finally {
+      win.sending = false;
+      el.send.disabled = false;
+      el.stop.classList.add("hidden");
+      win.aborter = null;
+    }
+  }
+
+  /** Dev-mode tools dropdown: reflects the tools actually offered right
+   *  now (the HA sensor tool appears only while HA is connected). */
+  function renderToolsList() {
+    const tools = availableTools();
+    el.toolsSummary.textContent = `Tools (${tools.length})`;
+    el.toolsBody.textContent = tools.map((tool) => {
+      const fn = tool.function;
+      const props = fn.parameters?.properties || {};
+      const required = new Set(fn.parameters?.required || []);
+      const params = Object.entries(props)
+        .map(([name, spec]) => `${name} (${spec.type || "value"}${required.has(name) ? ", required" : ""})`)
+        .join(", ");
+      return `${fn.name} — ${fn.description}${params ? `\n  params: ${params}` : ""}`;
+    }).join("\n\n");
+  }
+
+  // ----- bindings -----
+
+  el.sysBody.textContent = SYSTEM_PROMPT;
+  renderToolsList();
+  el.reasoning.value = reasoningEffort();
+  el.reasoning.addEventListener("change", () => localStorage.setItem(REASONING_STORAGE, el.reasoning.value));
+  el.send.onclick = sendAgentMessage;
+  el.stop.onclick = () => win.aborter?.abort();
+  el.clear.onclick = () => startNewChat();
+  el.historyBtn.onclick = () => setHistoryOpen(true);
+  el.historyClose.onclick = () => setHistoryOpen(false);
+  el.newBtn.onclick = () => spawnAgentWindow();
+  el.modelButton.onclick = (event) => {
+    event.stopPropagation();
+    setModelDropdown(el.modelDropdown.classList.contains("hidden"));
+  };
+  el.modelDropdown.onclick = (event) => event.stopPropagation();
+  el.modelSearch.addEventListener("input", renderModelList);
+  el.modelSearch.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setModelDropdown(false);
+  });
+  document.addEventListener("click", () => setModelDropdown(false));
+  const applyDev = () => {
+    cardEl.classList.toggle("agent-dev", win.devOn);
+    el.devBtn.setAttribute("aria-pressed", String(win.devOn));
+    if (win.devOn) renderContextGraph();
+  };
+  el.devBtn.onclick = () => {
+    win.devOn = !win.devOn;
+    localStorage.setItem("yello-agent-dev", win.devOn ? "1" : "0");
+    applyDev();
+  };
+  applyDev();
+  const growInput = () => {
+    el.input.style.height = "auto";
+    el.input.style.height = `${Math.min(el.input.scrollHeight, 140)}px`;
+  };
+  el.input.addEventListener("input", growInput);
+  growInput();
+  el.input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendAgentMessage();
+    }
+  });
+  refreshModelUi();
+  if (primary) restoreLastChat();
+  else greet();
+  return win;
+}
+
+// ---------- floating windows ----------
+
+function winGeometries() {
+  try {
+    return JSON.parse(localStorage.getItem(WIN_GEO_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveWinGeometry(slot, geo) {
+  const all = winGeometries();
+  all[slot] = geo;
+  localStorage.setItem(WIN_GEO_KEY, JSON.stringify(all));
+}
+
+function spawnAgentWindow() {
+  if (agentWindows.size >= MAX_AGENT_WINDOWS) {
+    toast(`Up to ${MAX_AGENT_WINDOWS} agent windows at once.`);
+    return null;
+  }
+  // Lowest free slot (the primary window is slot 0 and not counted here).
+  const used = new Set([...agentWindows].filter((w) => !w.primary).map((w) => w.slot));
+  let slot = 1;
+  while (used.has(slot)) slot += 1;
+  const saved = winGeometries()[slot];
+  const geo = saved && saved.w ? {
+    w: clampNumber(saved.w, 340, window.innerWidth - 16),
+    h: clampNumber(saved.h, 380, window.innerHeight - 16),
+    x: clampNumber(saved.x, 0, window.innerWidth - 120),
+    y: clampNumber(saved.y, 0, window.innerHeight - 80),
+  } : {
+    w: Math.min(500, window.innerWidth - 32),
+    h: Math.min(680, window.innerHeight - 110),
+    x: Math.max(8, window.innerWidth - 524 - (slot - 1) * 40),
+    y: 92 + (slot - 1) * 40,
+  };
+  const shell = document.createElement("div");
+  shell.className = "agent-window";
+  shell.style.cssText = `left: ${geo.x}px; top: ${geo.y}px; width: ${geo.w}px; height: ${geo.h}px;`;
+  shell.innerHTML = `
+    <div class="agent-window-head">
+      <svg class="ic" aria-hidden="true"><use href="#i-bot"></use></svg>
+      <span class="agent-window-title">Agent</span>
+      <span class="agent-window-spacer"></span>
+      <button type="button" class="icon-button agent-window-new" title="Open another agent window" aria-label="Open another agent window"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg></button>
+      <button type="button" class="icon-button agent-window-close" title="Close this window" aria-label="Close this window"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </div>
+    <div class="agent-window-body"></div>
+    <div class="agent-window-grip" title="Drag to resize"></div>`;
+  document.body.append(shell);
+  const card = document.createElement("section");
+  card.className = "settings-card agent-chat-card";
+  card.innerHTML = CHAT_CARD_HTML;
+  shell.querySelector(".agent-window-body").append(card);
+  const win = createAgentWindow(card, { primary: false });
+  win.slot = slot;
+  win.shell = shell;
+  const applyGeo = (g) => {
+    shell.style.left = `${g.x}px`;
+    shell.style.top = `${g.y}px`;
+    shell.style.width = `${g.w}px`;
+    shell.style.height = `${g.h}px`;
+  };
+  shell.querySelector(".agent-window-head").addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button")) return;
+    const start = { ...geo };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    startDrag(event, (ev) => {
+      geo.x = clampNumber(start.x + (ev.clientX - startX), 0, window.innerWidth - 120);
+      geo.y = clampNumber(start.y + (ev.clientY - startY), 0, window.innerHeight - 60);
+      applyGeo(geo);
+    }, () => saveWinGeometry(slot, geo));
+  });
+  shell.querySelector(".agent-window-grip").addEventListener("pointerdown", (event) => {
+    const start = { ...geo };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    startDrag(event, (ev) => {
+      geo.w = clampNumber(start.w + (ev.clientX - startX), 340, window.innerWidth - 16);
+      geo.h = clampNumber(start.h + (ev.clientY - startY), 380, window.innerHeight - 16);
+      applyGeo(geo);
+    }, () => saveWinGeometry(slot, geo));
+  });
+  shell.querySelector(".agent-window-new").onclick = () => spawnAgentWindow();
+  shell.querySelector(".agent-window-close").onclick = () => {
+    win.aborter?.abort();
+    agentWindows.delete(win);
+    shell.remove();
+  };
+  card.querySelector(".aw-input")?.focus();
+  return win;
 }
 
 // ---------- page setup ----------
-
-/** Dev-mode tools dropdown: reflects the tools actually offered right now
- *  (the HA sensor tool appears only while Home Assistant is connected). */
-function renderToolsList() {
-  const tools = availableTools();
-  $("agent-tools-summary").textContent = `Tools (${tools.length})`;
-  $("agent-tools-body").textContent = tools.map((tool) => {
-    const fn = tool.function;
-    const props = fn.parameters?.properties || {};
-    const required = new Set(fn.parameters?.required || []);
-    const params = Object.entries(props)
-      .map(([name, spec]) => `${name} (${spec.type || "value"}${required.has(name) ? ", required" : ""})`)
-      .join(", ");
-    return `${fn.name} — ${fn.description}${params ? `\n  params: ${params}` : ""}`;
-  }).join("\n\n");
-}
 
 export function initAgentPage() {
   if (initialized) return;
@@ -1968,62 +2336,17 @@ export function initAgentPage() {
     updateProviderUi();
   };
   $("agent-models-refresh").onclick = loadModels;
-  $("agent-model").onchange = () => {
-    localStorage.setItem(MODEL_STORAGE, $("agent-model").value);
-    syncModelButton();
-  };
-  const reasoningSelect = $("agent-reasoning");
-  if (reasoningSelect) {
-    reasoningSelect.value = reasoningEffort();
-    reasoningSelect.onchange = () => localStorage.setItem(REASONING_STORAGE, reasoningSelect.value);
-  }
-  $("agent-model-button").onclick = (event) => {
-    event.stopPropagation();
-    setModelDropdown($("agent-model-dropdown").classList.contains("hidden"));
-  };
-  $("agent-model-dropdown").onclick = (event) => event.stopPropagation();
-  $("agent-model-search").addEventListener("input", renderModelList);
-  $("agent-model-search").addEventListener("keydown", (event) => {
-    if (event.key === "Escape") setModelDropdown(false);
-  });
-  document.addEventListener("click", () => setModelDropdown(false));
-  $("agent-send").onclick = sendAgentMessage;
-  $("agent-stop").onclick = () => aborter?.abort();
-  $("agent-clear").onclick = () => startNewChat();
-  $("agent-history").onclick = () => setHistoryOpen(true);
-  $("agent-history-close").onclick = () => setHistoryOpen(false);
-  $("agent-system-prompt-body").textContent = SYSTEM_PROMPT;
-  renderToolsList();
-  const devButton = $("agent-dev");
-  const applyDev = () => {
-    const on = localStorage.getItem("yello-agent-dev") === "1";
-    $("agent-chat-card").classList.toggle("agent-dev", on);
-    devButton.setAttribute("aria-pressed", String(on));
-    if (on) renderContextGraph();
-  };
-  devButton.onclick = () => {
-    const on = localStorage.getItem("yello-agent-dev") === "1";
-    localStorage.setItem("yello-agent-dev", on ? "0" : "1");
-    applyDev();
-  };
-  applyDev();
+  // The primary window's card is the static shell in the page markup;
+  // its contents come from the same template as every spawned window.
+  const primaryCard = $("agent-chat-card");
+  primaryCard.innerHTML = CHAT_CARD_HTML;
+  createAgentWindow(primaryCard, { primary: true });
   $("agent-panel-close").onclick = () => setDock(false);
+  $("agent-panel-new").onclick = () => spawnAgentWindow();
   $("agent-panel-float").onclick = () => {
     panelMode = panelMode === "float" ? "dock" : "float";
     localStorage.setItem("yello-agent-panel-mode", panelMode);
     placeAgent();
-  };
-  // Pointer-drag helper: drag(event target) with move/up on the window.
-  const startDrag = (event, onMove, onDone) => {
-    event.preventDefault();
-    const move = (ev) => onMove(ev);
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      if (onDone) onDone();
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
   };
   // Docked: drag the panel's left edge to widen/narrow the column.
   $("agent-panel-resize").addEventListener("pointerdown", (event) => {
@@ -2065,26 +2388,5 @@ export function initAgentPage() {
     resizeTimer = setTimeout(placeAgent, 150);
   });
   placeAgent();
-  const input = $("agent-input");
-  const growInput = () => {
-    input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
-  };
-  input.addEventListener("input", growInput);
-  growInput();
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      sendAgentMessage();
-    }
-  });
   loadModels();
-  restoreLastChat();
-}
-
-function greet() {
-  addMessage(
-    "assistant",
-    "I can edit the design you have open: add or rearrange elements, restyle, create pages — then save and push it to your screens. Try: “Add a big clock and today's date to the main page.”",
-  );
 }

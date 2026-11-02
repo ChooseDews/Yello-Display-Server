@@ -684,12 +684,42 @@ esp-web-install-button { display: inline-block; }
 .tool-chip.tool-ok { color: #4ade80; border-color: rgba(74, 222, 128, .45); background: rgba(74, 222, 128, .08); }
 .tool-chip.tool-fail { color: #f87171; border-color: rgba(248, 113, 113, .5); background: rgba(248, 113, 113, .08); }
 .tool-body.tool-fail .tool-json { border-color: rgba(248, 113, 113, .35); }
-/* While the agent runs a tool call, the designer window breathes green. */
-.tool-pulse { animation: tool-breathe 1.5s ease-in-out infinite; }
+/* While the agent runs a tool call, the design view gets a glowing
+   green border that breathes — an inset ring plus an outer halo, so it
+   is unmistakable even at a glance from across the room. */
+.tool-pulse { animation: tool-breathe 1.4s ease-in-out infinite; }
 @keyframes tool-breathe {
-  0%, 100% { box-shadow: inset 0 0 0 2px rgba(74, 222, 128, .22), inset 0 0 18px rgba(74, 222, 128, .05); }
-  50% { box-shadow: inset 0 0 0 3px rgba(74, 222, 128, .65), inset 0 0 34px rgba(74, 222, 128, .14); }
+  0%, 100% { box-shadow: inset 0 0 0 2px rgba(74, 222, 128, .4), inset 0 0 24px rgba(74, 222, 128, .08), 0 0 18px rgba(74, 222, 128, .3); }
+  50% { box-shadow: inset 0 0 0 3px rgba(74, 222, 128, .9), inset 0 0 42px rgba(74, 222, 128, .18), 0 0 38px rgba(74, 222, 128, .55); }
 }
+/* Markdown inside assistant bubbles */
+.agent-messages .msg.assistant p { margin: 0 0 6px; }
+.agent-messages .msg.assistant p:last-child { margin-bottom: 0; }
+.agent-messages .msg.assistant .md-h { font-weight: 700; line-height: 1.3; margin: 8px 0 4px; }
+.agent-messages .msg.assistant .md-h:first-child { margin-top: 0; }
+.agent-messages .msg.assistant .md-h1 { font-size: 16px; }
+.agent-messages .msg.assistant .md-h2 { font-size: 15px; }
+.agent-messages .msg.assistant .md-h3, .agent-messages .msg.assistant .md-h4, .agent-messages .msg.assistant .md-h5, .agent-messages .msg.assistant .md-h6 { font-size: 13.5px; }
+.agent-messages .msg.assistant ul, .agent-messages .msg.assistant ol { margin: 4px 0 6px; padding-left: 18px; }
+.agent-messages .msg.assistant li { margin: 2px 0; }
+.agent-messages .msg.assistant blockquote { border-left: 3px solid var(--line-strong); padding-left: 9px; margin: 6px 0; color: var(--muted); }
+.agent-messages .msg.assistant hr { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
+.agent-messages .msg.assistant a { color: #6b9cff; text-decoration: underline; }
+.agent-messages .msg.assistant .md-table-wrap { overflow-x: auto; margin: 6px 0; }
+.agent-messages .msg.assistant .md-table { border-collapse: collapse; font-size: 12px; line-height: 1.4; }
+.agent-messages .msg.assistant .md-table th, .agent-messages .msg.assistant .md-table td { border: 1px solid var(--line); padding: 4px 8px; white-space: nowrap; }
+.agent-messages .msg.assistant .md-table th { background: rgba(255, 255, 255, .06); font-weight: 700; }
+.agent-messages .msg.assistant .md-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, .02); }
+/* Floating agent windows (spawned alongside the primary panel) */
+.agent-window { position: fixed; z-index: 45; display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 18px 50px rgba(0, 0, 0, .5); overflow: hidden; }
+.agent-window-head { display: flex; align-items: center; gap: 7px; padding: 7px 10px; background: var(--panel); border-bottom: 1px solid var(--line); cursor: grab; user-select: none; font-weight: 600; font-size: 13px; flex: none; }
+.agent-window-head:active { cursor: grabbing; }
+.agent-window-spacer { flex: 1; }
+.agent-window-body { flex: 1; display: flex; min-height: 0; }
+.agent-window-body .agent-chat-card { flex: 1; border: none; border-radius: 0; box-shadow: none; min-height: 0; }
+.agent-window-body .agent-messages { height: auto; min-height: 0; }
+.agent-window-grip { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; }
+.agent-window-grip::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border-right: 2px solid var(--line-strong); border-bottom: 2px solid var(--line-strong); opacity: .7; }
 .system-prompt { margin-bottom: 10px; }
 .system-prompt .thinking-body { max-height: 300px; }
 .agent-panel { display: none; }

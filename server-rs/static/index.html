@@ -319,72 +319,8 @@
           <span class="agent-model-tools"><button id="agent-models-refresh" type="button" class="assign-button">Refresh list</button> <span id="agent-model-state" class="subtle"></span></span>
         </div>
       </div>
-      <select id="agent-model" class="agent-model-native" aria-hidden="true" tabindex="-1"></select>
     </section>
-    <section class="settings-card agent-chat-card" id="agent-chat-card">
-      <div class="agent-chat-head">
-        <span class="agent-chat-title">Chat</span>
-        <span class="agent-head-tools">
-          <button id="agent-history" type="button" class="assign-button agent-history-button">History</button>
-          <button id="agent-dev" type="button" class="icon-button agent-dev-button" title="Dev mode: show tool calls and model thinking" aria-label="Toggle dev mode" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-wrench"></use></svg></button>
-        </span>
-      </div>
-      <div id="agent-context-graph" class="agent-context-graph">
-        <div id="agent-context-bar" class="agent-context-bar"></div>
-        <div id="agent-context-legend" class="agent-context-legend"></div>
-      </div>
-      <div id="agent-history-view" class="agent-history hidden">
-        <div class="agent-history-head">
-          <span class="agent-chat-title">Previous conversations</span>
-          <button id="agent-history-close" type="button" class="assign-button agent-history-button">Back to chat</button>
-        </div>
-        <div id="agent-history-list" class="agent-history-list"></div>
-      </div>
-      <details id="agent-system-prompt" class="thinking system-prompt">
-        <summary>System prompt</summary>
-        <div id="agent-system-prompt-body" class="thinking-body"></div>
-      </details>
-      <details id="agent-tools-prompt" class="thinking system-prompt">
-        <summary id="agent-tools-summary">Tools</summary>
-        <div id="agent-tools-body" class="thinking-body"></div>
-      </details>
-      <div id="agent-messages" class="agent-messages"></div>
-      <div class="agent-composer">
-        <textarea id="agent-input" rows="1" placeholder="Ask the agent to change the design…"></textarea>
-        <div class="agent-composer-row">
-          <button id="agent-clear" type="button" class="agent-clear-button" title="Start a new chat">Clear</button>
-          <span class="agent-composer-spacer"></span>
-          <button id="agent-stop" type="button" class="agent-stop-button hidden">Stop</button>
-          <button id="agent-send" type="button" class="agent-send-button" title="Send (Enter)" aria-label="Send"><svg class="ic" aria-hidden="true"><use href="#i-send"></use></svg></button>
-        </div>
-      </div>
-      <div class="agent-statusbar">
-        <div class="agent-model-picker">
-          <button id="agent-model-button" type="button" class="agent-model-button" aria-haspopup="listbox" aria-expanded="false" title="Choose a model">
-            <span id="agent-model-label" class="agent-model-label">Loading models…</span>
-            <svg class="ic" aria-hidden="true"><use href="#i-chev-down"></use></svg>
-          </button>
-          <div id="agent-model-dropdown" class="agent-model-dropdown hidden" role="listbox" aria-label="Models">
-            <div class="agent-model-search">
-              <svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg>
-              <input id="agent-model-search" type="text" placeholder="Search models…" autocomplete="off">
-            </div>
-            <div id="agent-model-list" class="agent-model-list"></div>
-            <div class="agent-model-foot"><span id="agent-model-count"></span><span>Vision models only</span></div>
-          </div>
-        </div>
-        <label class="agent-reasoning-wrap" title="Thinking level — reasoning effort sent to the model (for models that support it)">
-          <span>Thinking</span>
-          <select id="agent-reasoning" class="agent-reasoning-select">
-            <option value="off">Off</option>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-          </select>
-        </label>
-        <span id="agent-usage" class="agent-usage" title="Session token usage"></span>
-      </div>
-    </section>
+    <section class="settings-card agent-chat-card" id="agent-chat-card"></section>
     </div>
   </main>
 
@@ -393,6 +329,7 @@
     <div class="agent-panel-head">
       <svg class="ic" aria-hidden="true"><use href="#i-bot"></use></svg> Agent
       <span id="agent-status-pill" class="agent-status-pill" title="OpenRouter connection status"><span id="agent-status-dot" class="status-dot"></span><span id="agent-status-text">OpenRouter</span></span>
+      <button id="agent-panel-new" type="button" class="icon-button" aria-label="Open another agent window" title="New agent window"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg></button>
       <button id="agent-panel-float" type="button" class="icon-button" aria-label="Undock the agent panel" title="Undock"><svg class="ic" aria-hidden="true"><use href="#i-external"></use></svg></button>
       <button id="agent-panel-close" type="button" class="icon-button" aria-label="Close agent panel"><svg class="ic" aria-hidden="true"><use href="#i-x"></use></svg></button>
     </div>
