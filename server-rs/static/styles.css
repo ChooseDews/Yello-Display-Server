@@ -508,3 +508,34 @@ esp-web-install-button { display: inline-block; }
   .canvas-menu { width: 204px; }
   .canvas-menu button { padding: 10px 9px; }
 }
+
+/* Icon system: one local inline-SVG sprite (index.html), uniform 24px grid,
+   1.8 stroke, round caps. No remote assets. */
+.ic { width: 1.15em; height: 1.15em; display: inline-block; vertical-align: -0.2em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.palette-icon .ic { width: 15px; height: 15px; }
+.layer-type .ic { width: 15px; height: 15px; }
+.layer-row button .ic { width: 14px; height: 14px; vertical-align: -0.15em; }
+.icon-button .ic { width: 18px; height: 18px; vertical-align: middle; }
+.drawer-toggle .ic { width: 17px; height: 17px; vertical-align: middle; }
+.pa-icon .ic { width: 15px; height: 15px; }
+.tab-home { display: inline-flex; margin-right: 5px; vertical-align: -0.2em; }
+.tab-home .ic { width: 13px; height: 13px; }
+.empty-icon .ic { width: 30px; height: 30px; }
+.integration-logo .ic { width: 20px; height: 20px; vertical-align: middle; }
+.mobile-nav-brand .ic { width: 20px; height: 20px; vertical-align: middle; }
+.mobile-nav button .ic { width: 19px; height: 19px; }
+.secondary-button .ic, .primary-button .ic, .shared-toggle .ic, .connections-toggle .ic { vertical-align: -0.22em; }
+.save-icon .ic { width: 16px; height: 16px; vertical-align: -0.25em; }
+.flow-dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
+
+/* Phone selection quick-actions: shown by the editor only while a block is
+   selected on a narrow screen; sits directly above the bottom nav. */
+.selection-bar { display: none; }
+@media (max-width: 860px) {
+  .selection-bar { position: fixed; left: 8px; right: 8px; bottom: calc(64px + env(safe-area-inset-bottom)); z-index: 46; display: flex; gap: 2px; padding: 4px; border: 1px solid #39415a; border-radius: 13px; background: rgba(21, 25, 34, 0.97); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45); }
+  .selection-bar.hidden { display: none; }
+  .sel-action { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 38px; border-radius: 9px; color: var(--text); font-size: 12px; font-weight: 650; white-space: nowrap; }
+  .sel-action .ic { width: 16px; height: 16px; }
+  .sel-action.danger { color: #ff9a92; }
+  .pa-icon { display: inline-flex; }
+}

@@ -18,21 +18,26 @@ export const MAX_ZOOM = 3;
 export const clampZoom = (z) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
 export const TYPE_META = {
-  text: { label: "Text", icon: "T" },
-  clock: { label: "Clock", icon: "◷" },
-  "external-text": { label: "External text", icon: "↗" },
-  button: { label: "Button", icon: "▣" },
-  "design-link": { label: "Screen button", icon: "↪" },
-  image: { label: "Image", icon: "▧" },
-  "color-block": { label: "Color block", icon: "■" },
-  "ha-state": { label: "HA sensor", icon: "⌁" },
-  "ha-toggle": { label: "HA toggle", icon: "⏻" },
-  script: { label: "Script", icon: "{ }" },
-  screen: { label: "Screen embed", icon: "▦" },
-  gauge: { label: "Gauge", icon: "▰" },
-  qr: { label: "QR code", icon: "▩" },
-  shape: { label: "Shape", icon: "●" },
+  text: { label: "Text", icon: "type" },
+  clock: { label: "Clock", icon: "clock" },
+  "external-text": { label: "External text", icon: "external" },
+  button: { label: "Button", icon: "button-rect" },
+  "design-link": { label: "Screen button", icon: "enter" },
+  image: { label: "Image", icon: "image" },
+  "color-block": { label: "Color block", icon: "square-fill" },
+  "ha-state": { label: "HA sensor", icon: "activity" },
+  "ha-toggle": { label: "HA toggle", icon: "power" },
+  script: { label: "Script", icon: "code" },
+  screen: { label: "Screen embed", icon: "screen-embed" },
+  gauge: { label: "Gauge", icon: "gauge" },
+  qr: { label: "QR code", icon: "qr" },
+  shape: { label: "Shape", icon: "shapes" },
 };
+
+// Inline-SVG icon from the sprite defined in index.html (no remote assets).
+// `name` is a symbol id suffix: icon("trash") renders <use href="#i-trash">.
+export const icon = (name) =>
+  `<svg class="ic" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 
 export function compactNumber(value) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;

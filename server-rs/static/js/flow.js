@@ -154,7 +154,7 @@ function buildFlowCard(node, isRoot) {
   header.append(name);
   const dirtyDot = document.createElement("span");
   dirtyDot.className = "flow-dirty-dot";
-  dirtyDot.textContent = "●";
+  
   header.append(dirtyDot);
   card.append(header);
 

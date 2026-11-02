@@ -6,7 +6,7 @@ import { toast, isModalOpen, closeAppModal, submitAppModal, appConfirm } from ".
 import { commit, undo, redo, setDocumentState } from "./history.js";
 import {
   selected, addElement, duplicateSelected, deleteSelected, alignSelected,
-  setOrientation, hideContextMenu, showContextMenu, renderAll,
+  setOrientation, hideContextMenu, showContextMenu, renderAll, moveLayer,
 } from "./editor.js";
 import {
   setCanvasMode, sendLiveTouch, applyCodeLayout, formatCodeEditor, applyZoom, refreshPreview,
@@ -235,6 +235,10 @@ function bindEvents() {
   };
   $("ha-oauth").onclick = () => startHomeAssistantOAuth();
   $("duplicate").onclick = duplicateSelected;
+  $("sel-duplicate").onclick = duplicateSelected;
+  $("sel-delete").onclick = deleteSelected;
+  $("sel-forward").onclick = () => moveLayer(1);
+  $("sel-backward").onclick = () => moveLayer(-1);
   $("zoom-out").onclick = () => stepZoom(1 / 1.25);
   $("zoom-in").onclick = () => stepZoom(1.25);
   $("app-modal-cancel").onclick = () => closeAppModal(null);

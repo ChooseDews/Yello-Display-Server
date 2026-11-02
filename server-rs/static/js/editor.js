@@ -1,7 +1,7 @@
 // Canvas editor: element operations, page strip, layers, overlays,
 // pointer interactions, inspector, and the renderAll() hub.
 
-import { $, clone, TYPE_META } from "./util.js";
+import { $, clone, TYPE_META, icon, isNarrowScreen } from "./util.js";
 import {
   S, displayWidth, displayHeight, designDims, designNameOf,
   activePage, activePageIdFor, setActivePage, homePageIdOf, pageOf,
@@ -314,20 +314,29 @@ export function renderPageStrip() {
     const tab = document.createElement("button");
     tab.type = "button";
     tab.className = `page-tab${page.id === current ? " active" : ""}`;
-    tab.textContent = page.id === S.layout.homePageId ? `⌂ ${page.name}` : page.name;
+    if (page.id === S.layout.homePageId) {
+      const homeMark = document.createElement("span");
+      homeMark.className = "tab-home";
+      homeMark.innerHTML = icon("home");
+      const nameSpan = document.createElement("span");
+      nameSpan.textContent = page.name;
+      tab.append(homeMark, nameSpan);
+    } else {
+      tab.textContent = page.name;
+    }
     tab.title = page.id === S.layout.homePageId ? "Home page" : "Switch to this page";
     tab.onclick = () => switchPage(page.id);
     strip.append(tab);
   }
   const actions = document.createElement("div");
   actions.className = "page-actions";
-  const add = (icon, label, title, handler, disabled = false) => {
+  const add = (iconName, label, title, handler, disabled = false) => {
     const button = document.createElement("button");
     button.type = "button";
     const iconSpan = document.createElement("span");
     iconSpan.className = "pa-icon";
     iconSpan.setAttribute("aria-hidden", "true");
-    iconSpan.textContent = icon;
+    iconSpan.innerHTML = icon(iconName);
     const labelSpan = document.createElement("span");
     labelSpan.className = "pa-label";
     labelSpan.textContent = label;
@@ -338,11 +347,11 @@ export function renderPageStrip() {
     button.onclick = handler;
     actions.append(button);
   };
-  add("＋", "Page", "Add a page to this design", () => addPage());
-  add("✎", "Rename", "Rename the current page", () => renamePage());
-  add("⧉", "Duplicate", "Duplicate the current page", () => duplicatePage());
-  add("⌂", "Set home", "Make the current page the design's home page", () => setHomePage(), S.layout.homePageId === current);
-  add("✕", "Delete", "Delete the current page", () => deletePage(), S.layout.pages.length <= 1);
+  add("plus", "Page", "Add a page to this design", () => addPage());
+  add("pencil", "Rename", "Rename the current page", () => renamePage());
+  add("copy", "Duplicate", "Duplicate the current page", () => duplicatePage());
+  add("home", "Set home", "Make the current page the design's home page", () => setHomePage(), S.layout.homePageId === current);
+  add("trash", "Delete", "Delete the current page", () => deletePage(), S.layout.pages.length <= 1);
   strip.append(actions);
 }
 
@@ -360,20 +369,20 @@ function layerRow(element, { dimmed = false } = {}) {
   };
   const type = document.createElement("span");
   type.className = "layer-type";
-  type.textContent = TYPE_META[element.type].icon;
+  type.innerHTML = icon(TYPE_META[element.type].icon);
   const name = document.createElement("span");
   name.className = "layer-name";
   name.textContent = element.name;
   const visibility = document.createElement("button");
   visibility.title = element.visible ? "Hide layer" : "Show layer";
-  visibility.textContent = element.visible ? "◉" : "○";
+  visibility.innerHTML = icon(element.visible ? "eye" : "eye-off");
   visibility.onclick = (event) => {
     event.stopPropagation();
     commit(() => { element.visible = !element.visible; });
   };
   const lock = document.createElement("button");
   lock.title = element.locked ? "Unlock layer" : "Lock layer";
-  lock.textContent = element.locked ? "▣" : "▢";
+  lock.innerHTML = icon(element.locked ? "lock" : "lock-open");
   lock.onclick = (event) => {
     event.stopPropagation();
     commit(() => { element.locked = !element.locked; });
@@ -604,7 +613,7 @@ export function renderInspector() {
   $("duplicate").disabled = !element;
   if (!element) {
     container.className = "inspector-empty";
-    container.innerHTML = '<div class="empty-icon">◇</div><p>Select a block on the canvas or in Layers.</p>';
+    container.innerHTML = `<div class="empty-icon">${icon("pointer")}</div><p>Select a block on the canvas or in Layers.</p>`;
     renderResourceEditor(null);
     return;
   }
@@ -862,6 +871,13 @@ export function renderResourceEditor(element) {
   editor.append(fields);
 }
 
+export function updateSelectionBar() {
+  const bar = $("selection-bar");
+  if (!bar) return;
+  const show = isNarrowScreen() && Boolean(S.selectedId) && !$("designer-page").classList.contains("hidden");
+  bar.classList.toggle("hidden", !show);
+}
+
 export function renderAll() {
   renderDocumentFields();
   renderPageStrip();
@@ -871,4 +887,5 @@ export function renderAll() {
   renderInspector();
   if (S.canvasMode === "code" && !S.codeEditorDirty) syncCodeEditor(true);
   setDocumentState();
+  updateSelectionBar();
 }
