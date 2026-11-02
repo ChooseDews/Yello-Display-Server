@@ -123,7 +123,16 @@ pub fn brightness(rgb: (u8, u8, u8)) -> f64 {
     0.299 * (rgb.0 as f64) + 0.587 * (rgb.1 as f64) + 0.114 * (rgb.2 as f64)
 }
 
-// 8x8 Basic ASCII Font Bitmap
+// 8x8 Basic ASCII Font Bitmap — the public-domain font8x8_basic set
+// (Daniel Hepper, derived from IBM's public-domain VGA fonts), stored
+// row-major with the LSB as the leftmost pixel. Each glyph uses columns
+// 0-6 of its 8px cell (column 7 is spacing) and the full 8 rows:
+// descenders (g, j, p, q, y) and low punctuation (., ,, ;) reach rows
+// 5-7. The file this replaced was a lossy conversion whose bottom-row
+// data was destroyed — '.' ',' '_' were blank, ':' and ';' identical,
+// 'g'/'p'/'q' one identical bowl, so script label() text looked cut off
+// at the bottom and low punctuation vanished. The font_completeness
+// tests below pin the properties that conversion broke.
 pub const FONT_8X8: &[u8; 96 * 8] = include_bytes!("font8x8.bin");
 
 pub fn get_glyph(c: char) -> &'static [u8] {
@@ -1025,6 +1034,48 @@ mod tests {
             .expect("truetype render");
         let filled = ink(&img);
         assert!(filled > 200, "emoji should render real ink, got {filled}");
+    }
+
+    #[test]
+    fn font_completeness_no_blank_or_duplicate_glyphs() {
+        // The previous font file was a lossy conversion: '.' ',' '_'
+        // were entirely blank and several glyphs shared one bitmap
+        // (':'=';', 'E'='F', 'I'='L'='l', 'g'='q', 'i'='j', 'v'='y').
+        // Every printable glyph must have ink and be unique.
+        let mut seen = std::collections::HashMap::new();
+        for c in '!'..='~' {
+            let glyph = get_glyph(c);
+            assert!(glyph.iter().any(|&b| b != 0), "glyph {c:?} is blank");
+            if let Some(prev) = seen.insert(glyph, c) {
+                panic!("glyphs {prev:?} and {c:?} share one bitmap");
+            }
+        }
+    }
+
+    #[test]
+    fn font_completeness_descenders_and_low_punctuation() {
+        // Descenders reach the bottom row (7); low punctuation lives in
+        // rows 5-7. In the old file these rows were destroyed, so label()
+        // text looked cut off at the bottom.
+        for c in ['g', 'j', 'p', 'q', 'y'] {
+            assert!(get_glyph(c)[7] != 0, "{c:?} lost its descender (row 7 empty)");
+        }
+        assert!(get_glyph('.')[5] != 0 && get_glyph('.')[7] == 0, "period sits in rows 5-6");
+        assert!(get_glyph(',')[7] != 0, "comma tail reaches row 7");
+        let colon_rows = get_glyph(':').iter().filter(|&&b| b != 0).count();
+        assert_eq!(colon_rows, 4, "colon has two 2-row dots");
+        assert_ne!(get_glyph(':'), get_glyph(';'), "semicolon has a comma tail the colon lacks");
+        assert_ne!(get_glyph('E'), get_glyph('F'), "F lacks E's bottom bar");
+    }
+
+    #[test]
+    fn bitmap_text_bottom_row_renders() {
+        // End to end through draw_bitmap_text: a descender glyph's ink
+        // reaches the last row of its 8px cell.
+        let mut img = RgbaImage::from_pixel(16, 8, Rgba([0, 0, 0, 255]));
+        draw_bitmap_text(&mut img, 0, 0, "g.", Rgba([255, 255, 255, 255]), 1);
+        assert!(img.get_pixel(2, 7)[0] > 0 || img.get_pixel(3, 7)[0] > 0 || img.get_pixel(4, 7)[0] > 0,
+            "descender ink must reach row 7");
     }
 
     #[test]
