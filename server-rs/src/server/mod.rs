@@ -1,5 +1,6 @@
 //! Main server: WebSocket gateway for ESP32 devices + REST API for web UI.
 
+pub mod jq;
 pub mod mcp;
 
 use crate::frame_diff::dirty_regions;
@@ -1656,6 +1657,28 @@ pub async fn handle_http_request(
                     Ok(layout) => json_response(StatusCode::OK, &json!({"status": "ok", "layout": layout})),
                     Err(e) => json_response(StatusCode::UNPROCESSABLE_ENTITY, &json!({"error": "invalid layout", "details": e.errors})),
                 },
+                Err(_) => json_response(StatusCode::BAD_REQUEST, &json!({"error": "invalid JSON"})),
+            }
+        }
+        (Method::POST, "/api/jq") => {
+            // Run a jq program (Rust jaq) over arbitrary JSON: body
+            // {program, input} → {outputs}. The Studio agent's jq_design
+            // tool passes the open design here; nothing server-side mutates.
+            let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
+            match serde_json::from_slice::<Value>(&body_bytes) {
+                Ok(raw) => {
+                    let program = raw.get("program").and_then(|v| v.as_str()).unwrap_or("");
+                    match raw.get("input") {
+                        Some(input) => match jq::run_jq(program, input) {
+                            Ok(outputs) => {
+                                let truncated = outputs.len() >= jq::MAX_OUTPUTS;
+                                json_response(StatusCode::OK, &json!({"outputs": outputs, "truncated": truncated}))
+                            }
+                            Err(e) => json_response(StatusCode::BAD_REQUEST, &json!({"error": e})),
+                        },
+                        None => json_response(StatusCode::BAD_REQUEST, &json!({"error": "missing 'input' JSON value"})),
+                    }
+                }
                 Err(_) => json_response(StatusCode::BAD_REQUEST, &json!({"error": "invalid JSON"})),
             }
         }

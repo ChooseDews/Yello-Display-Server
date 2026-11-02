@@ -62,6 +62,12 @@ pub const SCRIPT_EXAMPLES: &[ScriptExample] = &[
         code: "state = ha(\"binary_sensor.front_door\")\nif state == \"on\":\n    clear(\"#9b2c3b\")\n    label(width / 2, height / 2, \"DOOR OPEN\", \"#ffffff\", 15, \"mm\")\nelse:\n    clear(\"#1f7a4d\")\n    label(width / 2, height / 2, \"Door closed\", \"#ffffff\", 15, \"mm\")",
     },
     ScriptExample {
+        id: "web-json",
+        name: "Web JSON value",
+        description: "Pulls a field out of an http-text data source's JSON with jq().",
+        code: "temp = jq(source(\"weather\"), \".current.temp_c\")\nif temp == None:\n    text(\"Weather unavailable\")\nelif temp < 10:\n    text(f\"Cold: {temp:.1f}°C\")\nelif temp < 25:\n    text(f\"Mild: {temp:.1f}°C\")\nelse:\n    text(f\"Hot: {temp:.1f}°C\")",
+    },
+    ScriptExample {
         id: "mini-chart",
         name: "Decorative mini chart",
         description: "Shows bounded loops and line drawing without external data.",
@@ -85,6 +91,10 @@ pub enum Token {
     Colon,
     Dot,
     Eq,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
     EqEq,
     NotEq,
     Lt,
@@ -98,8 +108,12 @@ pub enum Token {
     Percent,
     Power,
     KwIf,
+    KwElif,
     KwElse,
     KwFor,
+    KwWhile,
+    KwBreak,
+    KwContinue,
     KwIn,
     KwAnd,
     KwOr,
@@ -178,16 +192,36 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, ScriptError> {
                     tokens.push(Token::Gt); i += 1;
                 }
             }
-            else if c == '+' { tokens.push(Token::Plus); i += 1; }
-            else if c == '-' { tokens.push(Token::Minus); i += 1; }
+            else if c == '+' {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::PlusEq); i += 2;
+                } else {
+                    tokens.push(Token::Plus); i += 1;
+                }
+            }
+            else if c == '-' {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::MinusEq); i += 2;
+                } else {
+                    tokens.push(Token::Minus); i += 1;
+                }
+            }
             else if c == '*' {
                 if i + 1 < chars.len() && chars[i + 1] == '*' {
                     tokens.push(Token::Power); i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::StarEq); i += 2;
                 } else {
                     tokens.push(Token::Star); i += 1;
                 }
             }
-            else if c == '/' { tokens.push(Token::Slash); i += 1; }
+            else if c == '/' {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::SlashEq); i += 2;
+                } else {
+                    tokens.push(Token::Slash); i += 1;
+                }
+            }
             else if c == '%' { tokens.push(Token::Percent); i += 1; }
             else if c == '"' || c == '\'' {
                 let quote = c;
@@ -261,8 +295,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, ScriptError> {
                 let ident: String = chars[start..i].iter().collect();
                 match ident.as_str() {
                     "if" => tokens.push(Token::KwIf),
+                    "elif" => tokens.push(Token::KwElif),
                     "else" => tokens.push(Token::KwElse),
                     "for" => tokens.push(Token::KwFor),
+                    "while" => tokens.push(Token::KwWhile),
+                    "break" => tokens.push(Token::KwBreak),
+                    "continue" => tokens.push(Token::KwContinue),
                     "in" => tokens.push(Token::KwIn),
                     "and" => tokens.push(Token::KwAnd),
                     "or" => tokens.push(Token::KwOr),
@@ -365,6 +403,18 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Map a JSON value to a script value: scalars convert directly,
+/// objects/arrays become their compact JSON text (feed back into jq()).
+fn json_to_val(v: &Value) -> Val {
+    match v {
+        Value::Null => Val::Nil,
+        Value::Bool(b) => Val::Bool(*b),
+        Value::Number(n) => Val::Num(n.as_f64().unwrap_or(0.0)),
+        Value::String(s) => Val::Str(s.clone()),
+        _ => Val::Str(v.to_string()),
+    }
+}
+
 pub struct Runtime<'a> {
     pub width: u32,
     pub operations: usize,
@@ -459,6 +509,48 @@ impl<'a> Runtime<'a> {
                 let now = chrono::Local::now();
                 Ok(Val::Str(now.format(&fmt).to_string()))
             }
+            "source" => {
+                // The current text of an http-text data source, by id —
+                // the same values external-text elements display. Missing
+                // or not-yet-fetched sources read as "".
+                if args.len() != 1 {
+                    return Err(ScriptError::Error("source() expects a data source id".into()));
+                }
+                let id = args[0].to_string();
+                let text = self
+                    .context
+                    .get("external")
+                    .and_then(|e| e.get(&id))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(Val::Str(text))
+            }
+            "jq" => {
+                // jq(text, program): parse text as JSON and run a jq
+                // program over it (the same jaq engine as the jq_design
+                // tool). Unparsable JSON reads as None so scripts can
+                // guard on it; a bad program is a hard error. One scalar
+                // output comes back as that value; objects/arrays and
+                // multi-output programs come back as JSON text.
+                if args.len() != 2 {
+                    return Err(ScriptError::Error("jq() expects JSON text and a jq program".into()));
+                }
+                let text = args[0].to_string();
+                let program = args[1].to_string();
+                let parsed: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(Val::Nil),
+                };
+                match crate::server::jq::run_jq(&program, &parsed) {
+                    Ok(outputs) => Ok(match outputs.len() {
+                        0 => Val::Nil,
+                        1 => json_to_val(&outputs[0]),
+                        _ => Val::Str(Value::Array(outputs).to_string()),
+                    }),
+                    Err(e) => Err(ScriptError::Error(e)),
+                }
+            }
             "number" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(ScriptError::Error("number() expects a value and optional default".into()));
@@ -524,6 +616,73 @@ impl<'a> Runtime<'a> {
                 } else {
                     Err(ScriptError::Error("round() expects 1 or 2 args".into()))
                 }
+            }
+            "len" => {
+                if args.len() != 1 { return Err(ScriptError::Error("len() expects 1 arg".into())); }
+                match &args[0] {
+                    Val::Str(s) => Ok(Val::Num(s.chars().count() as f64)),
+                    _ => Err(ScriptError::Error("len() expects a string".into())),
+                }
+            }
+            "str" => {
+                if args.len() != 1 { return Err(ScriptError::Error("str() expects 1 arg".into())); }
+                Ok(Val::Str(args[0].to_string()))
+            }
+            "int" => {
+                if args.len() != 1 { return Err(ScriptError::Error("int() expects 1 arg".into())); }
+                Ok(Val::Num(args[0].to_f64()?.trunc()))
+            }
+            "float" => {
+                if args.len() != 1 { return Err(ScriptError::Error("float() expects 1 arg".into())); }
+                Ok(Val::Num(args[0].to_f64()?))
+            }
+            "bool" => {
+                if args.len() != 1 { return Err(ScriptError::Error("bool() expects 1 arg".into())); }
+                Ok(Val::Bool(args[0].is_truthy()))
+            }
+            "floor" => {
+                if args.len() != 1 { return Err(ScriptError::Error("floor() expects 1 arg".into())); }
+                Ok(Val::Num(args[0].to_f64()?.floor()))
+            }
+            "ceil" => {
+                if args.len() != 1 { return Err(ScriptError::Error("ceil() expects 1 arg".into())); }
+                Ok(Val::Num(args[0].to_f64()?.ceil()))
+            }
+            "pow" => {
+                if args.len() != 2 { return Err(ScriptError::Error("pow() expects 2 args".into())); }
+                Ok(Val::Num(args[0].to_f64()?.powf(args[1].to_f64()?)))
+            }
+            "lerp" => {
+                if args.len() != 3 { return Err(ScriptError::Error("lerp() expects a, b, t".into())); }
+                let a = args[0].to_f64()?;
+                let b = args[1].to_f64()?;
+                let t = args[2].to_f64()?;
+                Ok(Val::Num(a + (b - a) * t))
+            }
+            "map_range" => {
+                if args.len() != 5 { return Err(ScriptError::Error("map_range() expects value, in_min, in_max, out_min, out_max".into())); }
+                let x = args[0].to_f64()?;
+                let in_min = args[1].to_f64()?;
+                let in_max = args[2].to_f64()?;
+                let out_min = args[3].to_f64()?;
+                let out_max = args[4].to_f64()?;
+                if in_max == in_min { return Err(ScriptError::Error("map_range() input range is empty".into())); }
+                Ok(Val::Num(out_min + (x - in_min) * (out_max - out_min) / (in_max - in_min)))
+            }
+            "upper" => {
+                if args.len() != 1 { return Err(ScriptError::Error("upper() expects 1 arg".into())); }
+                Ok(Val::Str(args[0].to_string().to_uppercase()))
+            }
+            "lower" => {
+                if args.len() != 1 { return Err(ScriptError::Error("lower() expects 1 arg".into())); }
+                Ok(Val::Str(args[0].to_string().to_lowercase()))
+            }
+            "rgb" => {
+                if args.len() != 3 { return Err(ScriptError::Error("rgb() expects r, g, b".into())); }
+                let ch = |v: &Val| -> Result<u8, ScriptError> {
+                    Ok(v.to_f64()?.round().clamp(0.0, 255.0) as u8)
+                };
+                Ok(Val::Str(format!("#{:02x}{:02x}{:02x}", ch(&args[0])?, ch(&args[1])?, ch(&args[2])?)))
             }
             "text" => {
                 if args.len() != 1 { return Err(ScriptError::Error("text() expects 1 arg".into())); }
@@ -727,7 +886,20 @@ pub fn eval_fstring(raw: &str, runtime: &mut Runtime) -> Result<String, ScriptEr
 
             let val = eval_expr_str(expr_part, runtime)?;
             if let Some(fmt) = fmt_part {
-                if fmt.ends_with('f') {
+                if fmt.ends_with('d') {
+                    // Integer with optional width / zero padding: {n:02d}, {n:3d}, {n:d}
+                    let spec = fmt.trim_end_matches('d');
+                    let zero = spec.starts_with('0') && spec.len() > 1;
+                    let width = spec.trim_start_matches('0').parse::<usize>().unwrap_or(0);
+                    let n = val.to_f64()?.trunc() as i64;
+                    if zero {
+                        out.push_str(&format!("{:0width$}", n, width = width));
+                    } else if width > 0 {
+                        out.push_str(&format!("{:width$}", n, width = width));
+                    } else {
+                        out.push_str(&format!("{n}"));
+                    }
+                } else if fmt.ends_with('f') {
                     let num = val.to_f64()?;
                     let decimals = fmt.trim_end_matches('f').trim_start_matches('.').parse::<usize>().unwrap_or(1);
                     out.push_str(&format!("{:.prec$}", num, prec = decimals));
@@ -756,7 +928,53 @@ pub fn eval_expr_str(expr_str: &str, runtime: &mut Runtime) -> Result<Val, Scrip
 }
 
 fn parse_expr(p: &mut Parser, rt: &mut Runtime) -> Result<Val, ScriptError> {
-    parse_or(p, rt)
+    let value = parse_or(p, rt)?;
+    // Ternary: `value if cond else other`. The first operand is evaluated
+    // before the condition is known (this interpreter evaluates as it
+    // parses), so keep it side-effect free; the else branch stays lazy —
+    // it is skipped token-wise when the condition holds.
+    if p.match_token(&Token::KwIf) {
+        let cond = parse_or(p, rt)?;
+        if !p.match_token(&Token::KwElse) {
+            return Err(ScriptError::Error("expected 'else' in conditional expression".into()));
+        }
+        if cond.is_truthy() {
+            skip_expr(p)?;
+            Ok(value)
+        } else {
+            parse_expr(p, rt)
+        }
+    } else {
+        Ok(value)
+    }
+}
+
+/// Advance past one expression's tokens without evaluating them (the
+/// untaken ternary branch). Tracks parenthesis depth; stops at the token
+/// that ends the expression in the enclosing context.
+fn skip_expr(p: &mut Parser) -> Result<(), ScriptError> {
+    let mut depth = 0i32;
+    loop {
+        match p.peek() {
+            Token::Eof => break,
+            Token::LParen => {
+                depth += 1;
+                p.advance();
+            }
+            Token::RParen => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                p.advance();
+            }
+            Token::Newline | Token::Comma | Token::Dedent | Token::Colon if depth == 0 => break,
+            _ => {
+                p.advance();
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_or(p: &mut Parser, rt: &mut Runtime) -> Result<Val, ScriptError> {
@@ -788,6 +1006,14 @@ fn parse_not(p: &mut Parser, rt: &mut Runtime) -> Result<Val, ScriptError> {
 
 fn parse_comparison(p: &mut Parser, rt: &mut Runtime) -> Result<Val, ScriptError> {
     let left = parse_add_sub(p, rt)?;
+    if p.check(&Token::KwIn) {
+        p.advance();
+        let right = parse_add_sub(p, rt)?;
+        return match (&left, &right) {
+            (Val::Str(needle), Val::Str(haystack)) => Ok(Val::Bool(haystack.contains(needle.as_str()))),
+            _ => Err(ScriptError::Error("'in' expects two strings (substring test)".into())),
+        };
+    }
     let op = p.peek().clone();
     match op {
         Token::EqEq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq => {
@@ -922,7 +1148,17 @@ fn parse_primary(p: &mut Parser, rt: &mut Runtime) -> Result<Val, ScriptError> {
     }
 }
 
-fn execute_statements(p: &mut Parser, rt: &mut Runtime) -> Result<(), ScriptError> {
+/// Loop control signal bubbling out of a block: a block that receives
+/// Break/Continue first consumes the rest of its own construct's tokens,
+/// then propagates the signal to the enclosing loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Normal,
+    Break,
+    Continue,
+}
+
+fn execute_statements(p: &mut Parser, rt: &mut Runtime) -> Result<Flow, ScriptError> {
     while !p.check(&Token::Eof) && !p.check(&Token::Dedent) {
         while p.match_token(&Token::Newline) {}
         if p.check(&Token::Eof) || p.check(&Token::Dedent) {
@@ -931,35 +1167,86 @@ fn execute_statements(p: &mut Parser, rt: &mut Runtime) -> Result<(), ScriptErro
 
         rt.tick(1)?;
 
-        if p.match_token(&Token::KwIf) {
-            let cond = parse_expr(p, rt)?;
-            if !p.match_token(&Token::Colon) {
-                return Err(ScriptError::Error("expected ':' after if condition".into()));
-            }
-            if !p.match_token(&Token::Newline) {
-                return Err(ScriptError::Error("expected newline after if:".into()));
-            }
-            if !p.match_token(&Token::Indent) {
-                return Err(ScriptError::Error("expected indent in if block".into()));
-            }
+        if p.match_token(&Token::KwBreak) {
+            p.match_token(&Token::Newline);
+            return Ok(Flow::Break);
+        }
+        if p.match_token(&Token::KwContinue) {
+            p.match_token(&Token::Newline);
+            return Ok(Flow::Continue);
+        }
 
-            if cond.is_truthy() {
-                execute_statements(p, rt)?;
-                if p.match_token(&Token::Dedent) {}
-                if p.match_token(&Token::KwElse) {
-                    if !p.match_token(&Token::Colon) || !p.match_token(&Token::Newline) || !p.match_token(&Token::Indent) {
-                        return Err(ScriptError::Error("invalid else block".into()));
-                    }
+        if p.match_token(&Token::KwIf) {
+            // if / elif* / else? chain: branches run in order until one is
+            // taken; the rest are skipped without executing.
+            let mut flow = Flow::Normal;
+            let mut decided = false;
+            loop {
+                let cond = parse_expr(p, rt)?;
+                if !p.match_token(&Token::Colon) {
+                    return Err(ScriptError::Error("expected ':' after if/elif condition".into()));
+                }
+                if !p.match_token(&Token::Newline) {
+                    return Err(ScriptError::Error("expected newline after ':'".into()));
+                }
+                if !p.match_token(&Token::Indent) {
+                    return Err(ScriptError::Error("expected indent in if block".into()));
+                }
+                if !decided && cond.is_truthy() {
+                    flow = execute_statements(p, rt)?;
+                    if p.match_token(&Token::Dedent) {}
+                    decided = true;
+                } else {
                     skip_block(p)?;
                 }
-            } else {
-                skip_block(p)?;
+                if p.match_token(&Token::KwElif) {
+                    continue;
+                }
                 if p.match_token(&Token::KwElse) {
                     if !p.match_token(&Token::Colon) || !p.match_token(&Token::Newline) || !p.match_token(&Token::Indent) {
                         return Err(ScriptError::Error("invalid else block".into()));
                     }
-                    execute_statements(p, rt)?;
-                    if p.match_token(&Token::Dedent) {}
+                    if !decided {
+                        flow = execute_statements(p, rt)?;
+                        if p.match_token(&Token::Dedent) {}
+                    } else {
+                        skip_block(p)?;
+                    }
+                }
+                break;
+            }
+            if flow != Flow::Normal {
+                return Ok(flow);
+            }
+        } else if p.match_token(&Token::KwWhile) {
+            let cond_start = p.pos;
+            let mut iterations = 0usize;
+            loop {
+                iterations += 1;
+                if iterations > MAX_LOOP_ITEMS {
+                    return Err(ScriptError::Error(format!("while loops are limited to {MAX_LOOP_ITEMS} iterations")));
+                }
+                p.pos = cond_start;
+                let cond = parse_expr(p, rt)?;
+                if !p.match_token(&Token::Colon) || !p.match_token(&Token::Newline) || !p.match_token(&Token::Indent) {
+                    return Err(ScriptError::Error("expected ':' and indent in while loop".into()));
+                }
+                if !cond.is_truthy() {
+                    skip_block(p)?;
+                    break;
+                }
+                let flow = execute_statements(p, rt)?;
+                match flow {
+                    Flow::Normal => {
+                        if p.match_token(&Token::Dedent) {}
+                    }
+                    Flow::Continue => {
+                        skip_block(p)?;
+                    }
+                    Flow::Break => {
+                        skip_block(p)?;
+                        break;
+                    }
                 }
             }
         } else if p.match_token(&Token::KwFor) {
@@ -1012,21 +1299,70 @@ fn execute_statements(p: &mut Parser, rt: &mut Runtime) -> Result<(), ScriptErro
 
             let loop_body_start = p.pos;
             let mut current = start;
+            let mut broke = false;
             for _ in 0..count {
                 rt.vars.insert(var_name.clone(), Val::Num(current as f64));
                 p.pos = loop_body_start;
-                execute_statements(p, rt)?;
+                let flow = execute_statements(p, rt)?;
                 current += step;
+                match flow {
+                    Flow::Normal => {}
+                    Flow::Continue => {
+                        skip_block(p)?;
+                    }
+                    Flow::Break => {
+                        skip_block(p)?;
+                        broke = true;
+                        break;
+                    }
+                }
             }
-            if p.match_token(&Token::Dedent) {}
+            if !broke {
+                if p.match_token(&Token::Dedent) {}
+            }
         } else if let Token::Ident(name) = p.peek().clone() {
-            if p.tokens.get(p.pos + 1) == Some(&Token::Eq) {
+            let assign_op = p.tokens.get(p.pos + 1).cloned();
+            let is_assign = matches!(
+                assign_op,
+                Some(Token::Eq) | Some(Token::PlusEq) | Some(Token::MinusEq) | Some(Token::StarEq) | Some(Token::SlashEq)
+            );
+            if is_assign {
                 p.advance(); // skip name
-                p.advance(); // skip Eq
+                p.advance(); // skip operator
                 if name.starts_with('_') || ["width", "height", "pi"].contains(&name.as_str()) {
                     return Err(ScriptError::Error(format!("cannot assign to {name}")));
                 }
-                let val = parse_expr(p, rt)?;
+                let rhs = parse_expr(p, rt)?;
+                let val = match assign_op {
+                    Some(Token::Eq) => rhs,
+                    Some(op) => {
+                        let cur = rt
+                            .vars
+                            .get(&name)
+                            .cloned()
+                            .ok_or_else(|| ScriptError::Error(format!("undefined variable: {name}")))?;
+                        match op {
+                            Token::PlusEq => {
+                                if let (Val::Str(a), Val::Str(b)) = (&cur, &rhs) {
+                                    Val::Str(format!("{a}{b}"))
+                                } else {
+                                    Val::Num(cur.to_f64()? + rhs.to_f64()?)
+                                }
+                            }
+                            Token::MinusEq => Val::Num(cur.to_f64()? - rhs.to_f64()?),
+                            Token::StarEq => Val::Num(cur.to_f64()? * rhs.to_f64()?),
+                            Token::SlashEq => {
+                                let r = rhs.to_f64()?;
+                                if r == 0.0 {
+                                    return Err(ScriptError::Error("division by zero".into()));
+                                }
+                                Val::Num(cur.to_f64()? / r)
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => unreachable!(),
+                };
                 rt.vars.insert(name, val);
                 p.match_token(&Token::Newline);
             } else {
@@ -1038,7 +1374,7 @@ fn execute_statements(p: &mut Parser, rt: &mut Runtime) -> Result<(), ScriptErro
             p.match_token(&Token::Newline);
         }
     }
-    Ok(())
+    Ok(Flow::Normal)
 }
 
 fn skip_block(p: &mut Parser) -> Result<(), ScriptError> {
@@ -1071,7 +1407,11 @@ pub fn execute_script(
 
     let mut runtime = Runtime::new(width.max(1), height.max(1), context);
     let mut parser = Parser::new(&tokens);
-    execute_statements(&mut parser, &mut runtime)?;
+    match execute_statements(&mut parser, &mut runtime)? {
+        Flow::Normal => {}
+        Flow::Break => return Err(ScriptError::Error("break outside a loop".into())),
+        Flow::Continue => return Err(ScriptError::Error("continue outside a loop".into())),
+    }
 
     if runtime.drew {
         Ok(ScriptOutput {
@@ -1136,6 +1476,114 @@ mod tests {
         }
         assert!(max_x < 32, "ink must stay inside the 32px block, got max_x={max_x}");
         assert!(max_x >= 24, "the full 4-char label should render, got max_x={max_x}");
+    }
+
+    #[test]
+    fn test_elif_chain() {
+        let ctx = json!({});
+        let pick = |v: i32| {
+            let code = format!(
+                "v = {v}\nif v == 1:\n    text(\"one\")\nelif v == 2:\n    text(\"two\")\nelif v == 3:\n    text(\"three\")\nelse:\n    text(\"many\")"
+            );
+            execute_script(&code, 100, 50, &ctx).unwrap().text.unwrap()
+        };
+        assert_eq!(pick(1), "one");
+        assert_eq!(pick(2), "two");
+        assert_eq!(pick(3), "three");
+        assert_eq!(pick(9), "many");
+        // No else: a non-matching chain is a no-op.
+        let out = execute_script("v = 5\nif v == 1:\n    text(\"one\")\nelif v == 2:\n    text(\"two\")", 100, 50, &ctx).unwrap();
+        assert_eq!(out.text.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_while_break_continue_and_augmented_assign() {
+        let ctx = json!({});
+        // Sum the odd numbers 1..=9: while + continue + break + +=.
+        let code = "total = 0\nn = 0\nwhile n < 20:\n    n += 1\n    if n > 9:\n        break\n    if n % 2 == 0:\n        continue\n    total += n\ntext(str(total))";
+        let out = execute_script(code, 100, 50, &ctx).unwrap();
+        assert_eq!(out.text.as_deref(), Some("25"));
+        // while True with a break terminates.
+        let code2 = "n = 0\nwhile True:\n    n += 1\n    if n == 3:\n        break\ntext(str(n))";
+        let out2 = execute_script(code2, 100, 50, &ctx).unwrap();
+        assert_eq!(out2.text.as_deref(), Some("3"));
+        // An unbounded while hits the iteration cap, not the op budget first.
+        let err = execute_script("while True:\n    x = 1", 100, 50, &ctx).unwrap_err();
+        assert!(format!("{err}").contains("while"), "cap error: {err}");
+        // break outside a loop is an error.
+        assert!(execute_script("break", 100, 50, &ctx).is_err());
+    }
+
+    #[test]
+    fn test_for_break_and_continue() {
+        let ctx = json!({});
+        let code = "total = 0\nfor i in range(10):\n    if i == 3:\n        break\n    total += i\ntext(str(total))";
+        assert_eq!(execute_script(code, 100, 50, &ctx).unwrap().text.as_deref(), Some("3"));
+        let code2 = "total = 0\nfor i in range(6):\n    if i % 2 == 0:\n        continue\n    total += i\ntext(str(total))";
+        assert_eq!(execute_script(code2, 100, 50, &ctx).unwrap().text.as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn test_ternary_and_in() {
+        let ctx = json!({});
+        let code = "x = 7\nlabel_text = \"big\" if x > 5 else \"small\"\ntext(label_text)";
+        assert_eq!(execute_script(code, 100, 50, &ctx).unwrap().text.as_deref(), Some("big"));
+        let code2 = "x = 2\ntext(\"big\" if x > 5 else \"small\")";
+        assert_eq!(execute_script(code2, 100, 50, &ctx).unwrap().text.as_deref(), Some("small"));
+        // Nested ternary in the else branch.
+        let code3 = "x = 2\ntext(\"a\" if x == 1 else \"b\" if x == 2 else \"c\")";
+        assert_eq!(execute_script(code3, 100, 50, &ctx).unwrap().text.as_deref(), Some("b"));
+        // Ternary inside call arguments, before a comma.
+        let code4 = "text(str(max(1 if False else 4, 3)))";
+        assert_eq!(execute_script(code4, 100, 50, &ctx).unwrap().text.as_deref(), Some("4"));
+        let code5 = "state = \"heating\"\nif \"heat\" in state:\n    text(\"warm\")\nelse:\n    text(\"cold\")";
+        assert_eq!(execute_script(code5, 100, 50, &ctx).unwrap().text.as_deref(), Some("warm"));
+    }
+
+    #[test]
+    fn test_new_builtins() {
+        let ctx = json!({});
+        let cases: &[(&str, &str)] = &[
+            ("text(str(len(\"hello\")))", "5"),
+            ("text(str(int(3.9)))", "3"),
+            ("text(str(float(\"2.5\") + 1))", "3.5"),
+            ("text(str(floor(2.7)) + \"/\" + str(ceil(2.1)))", "2/3"),
+            ("text(str(pow(2, 10)))", "1024"),
+            ("text(str(lerp(0, 100, 0.25)))", "25"),
+            ("text(str(map_range(15, 10, 20, 0, 100)))", "50"),
+            ("text(upper(\"on\") + \"/\" + lower(\"OFF\"))", "ON/off"),
+            ("text(rgb(255, 128, 0))", "#ff8000"),
+            ("text(str(bool(\"x\")) + \"/\" + str(bool(\"\")))", "True/False"),
+            ("s = \"a\"\ns += \"b\"\ns += str(1)\ntext(s)", "ab1"),
+            ("text(f\"{7:02d}:{3:02d}\")", "07:03"),
+        ];
+        for (code, want) in cases {
+            let out = execute_script(code, 100, 50, &ctx).unwrap();
+            assert_eq!(out.text.as_deref(), Some(*want), "script: {code}");
+        }
+    }
+
+    #[test]
+    fn test_source_and_jq() {
+        let ctx = json!({
+            "external": {
+                "weather": "{\"current\": {\"temp_c\": 21.5, \"label\": \"Sunny\"}, \"tags\": [\"a\", \"b\"]}"
+            }
+        });
+        let num = execute_script("t = jq(source(\"weather\"), \".current.temp_c\")\ntext(str(t))", 100, 50, &ctx).unwrap();
+        assert_eq!(num.text.as_deref(), Some("21.5"));
+        let string = execute_script("text(jq(source(\"weather\"), \".current.label\"))", 100, 50, &ctx).unwrap();
+        assert_eq!(string.text.as_deref(), Some("Sunny"));
+        // Objects come back as JSON text; missing fields and unparsable
+        // sources read as None.
+        let obj = execute_script("text(jq(source(\"weather\"), \".current\"))", 100, 50, &ctx).unwrap();
+        assert_eq!(obj.text.as_deref(), Some("{\"label\":\"Sunny\",\"temp_c\":21.5}"));
+        let missing = execute_script("if jq(source(\"weather\"), \".nope\") == None:\n    text(\"none\")", 100, 50, &ctx).unwrap();
+        assert_eq!(missing.text.as_deref(), Some("none"));
+        let bad_source = execute_script("if jq(source(\"absent\"), \".x\") == None:\n    text(\"none\")", 100, 50, &ctx).unwrap();
+        assert_eq!(bad_source.text.as_deref(), Some("none"));
+        // A bad jq program is a hard error, unlike bad data.
+        assert!(execute_script("text(jq(source(\"weather\"), \".[\"))", 100, 50, &ctx).is_err());
     }
 
     #[test]
