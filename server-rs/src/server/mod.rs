@@ -31,9 +31,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use url::Url;
 
 pub const MAX_ZONE_AREA_PX: u32 = 480;
-pub const ZONE_HEADER_BYTES: usize = 16;
 pub const STREAM_STATS_WINDOW_S: f64 = 10.0;
-pub const ZONE_PACING_S: f64 = 0.002;
 pub const MAX_EXTERNAL_BYTES: usize = 8192;
 pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_IMAGE_PIXELS: u64 = 4_000_000;
@@ -211,8 +209,29 @@ pub struct DeviceSession {
     /// Last touch or navigation; drives the idle return-to-home.
     pub last_interaction: Instant,
     pub ws_sender: Option<mpsc::UnboundedSender<WsMessage>>,
+    /// Next FramePatch sequence number for this device (protocol v2).
+    /// Incremented once per patch actually sent; the device uses gaps
+    /// to detect a dropped patch and ask for a full resync.
+    pub frame_seq: u32,
+    /// Firmware version reported by the device ("2.0.0"), from the
+    /// DeviceHello handshake or the `fw=` WebSocket URL hint. None =
+    /// the device has never identified itself (pre-hello firmware).
+    pub firmware_version: Option<String>,
+    /// Wire protocol version the device says it speaks (DeviceHello /
+    /// `proto=` hint). None = never identified itself.
+    pub device_proto_version: Option<u8>,
+    /// Negotiated capability bitmask (protocol::CAP_*). 0 = unknown:
+    /// nothing optional may be sent to such a device.
+    pub capabilities: u32,
+    /// Derived from `capabilities & CAP_DEFLATE` whenever capabilities
+    /// are (re)set. push_frame sends compressed FramePatch payloads
+    /// only when this is true; otherwise the bundle goes out raw.
+    pub supports_compression: bool,
+    /// True once a real DeviceHello message (not just the URL hint)
+    /// has been received on this connection.
+    pub hello_received: bool,
     /// Serializes frame pushes per device so the global device map is never
-    /// held across the (paced) zone send loop.
+    /// held across the render or the patch send.
     pub push_lock: Arc<Mutex<()>>,
     /// Last time the background render tick pushed for this device (gates the
     /// 30 s slow tick for designs without clock/script elements).
@@ -742,8 +761,8 @@ pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> R
     let _guard = push_lock.lock().await;
 
     // Phase 1: snapshot session state. The global device map is locked only
-    // for these clones — never across the render or the paced zone send.
-    let (ws_sender, design_id, page_id, orientation, prev_frame, pressed, dots, last_full_push) = {
+    // for these clones — never across the render or the patch send.
+    let (ws_sender, design_id, page_id, orientation, prev_frame, pressed, dots, last_full_push, frame_seq, supports_compression) = {
         let studio = state.studio.read().await;
         let mut devices = state.devices.write().await;
         let session = match devices.get_mut(device_id) {
@@ -766,6 +785,8 @@ pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> R
             session.pressed.clone(),
             session.dots.clone(),
             session.last_full_push,
+            session.frame_seq,
+            session.supports_compression,
         )
     };
 
@@ -785,7 +806,7 @@ pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> R
     // layout (page elements + the shared elements opted into this page).
     let layout = effective_page_layout(&layout, &page_id).unwrap_or(layout);
 
-    // Phase 2: lock-free render, region diff, encode and paced send.
+    // Phase 2: lock-free render, region diff, bundle, compress, one send.
     let mut full = full;
     let layout_orientation = layout.get("orientation").and_then(|v| v.as_str()).unwrap_or("portrait").to_string();
     if orientation != layout_orientation {
@@ -824,53 +845,55 @@ pub async fn push_frame(state: &Arc<AppState>, device_id: &str, full: bool) -> R
         return Ok(());
     }
 
-    let mut pixels_sent = 0u64;
-    let mut zones_sent = 0u32;
+    // Bundle every dirty region into zone records: one pass per region,
+    // RGB888 -> big-endian RGB565.
     let raw = frame.as_raw();
     let frame_w = frame.width() as usize;
-
+    let mut zones: Vec<ZoneRecord> = Vec::with_capacity(regions.len());
+    let mut pixels_sent = 0u64;
     for (x, y, w, h) in &regions {
-        let rows_per_chunk = (MAX_ZONE_AREA_PX / w).max(1);
-        let mut current_y = *y;
-        while current_y < y + h {
-            let chunk_height = rows_per_chunk.min(y + h - current_y);
-
-            // Single pass over the zone's rows: RGB888 -> big-endian RGB565.
-            let mut pixels_rgb565 = Vec::with_capacity((w * chunk_height * 2) as usize);
-            pixels_rgb565.resize((w * chunk_height * 2) as usize, 0);
-            for row in current_y..(current_y + chunk_height) {
-                let src = &raw[(row as usize * frame_w + *x as usize) * 3..];
-                let row_start = ((row - current_y) as usize) * (*w as usize) * 2;
-                for col in 0..(*w as usize) {
-                    let r = src[col * 3] as u16;
-                    let g = src[col * 3 + 1] as u16;
-                    let b = src[col * 3 + 2] as u16;
-                    let val = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-                    pixels_rgb565[row_start + col * 2] = (val >> 8) as u8;
-                    pixels_rgb565[row_start + col * 2 + 1] = (val & 0xFF) as u8;
-                }
+        let mut pixels_rgb565 = vec![0u8; (w * h * 2) as usize];
+        for row in *y..(*y + *h) {
+            let src = &raw[(row as usize * frame_w + *x as usize) * 3..];
+            let row_start = ((row - *y) as usize) * (*w as usize) * 2;
+            for col in 0..(*w as usize) {
+                let r = src[col * 3] as u16;
+                let g = src[col * 3 + 1] as u16;
+                let b = src[col * 3 + 2] as u16;
+                let val = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+                pixels_rgb565[row_start + col * 2] = (val >> 8) as u8;
+                pixels_rgb565[row_start + col * 2 + 1] = (val & 0xFF) as u8;
             }
-
-            let zone = ZoneUpdate::new(*x as u16, current_y as u16, *w as u16, chunk_height as u16, pixels_rgb565);
-            let packet = zone.pack();
-            let _ = ws_sender.send(WsMessage::Binary(packet));
-
-            pixels_sent += (*w as u64) * (chunk_height as u64);
-            zones_sent += 1;
-            current_y += chunk_height;
-
-            tokio::time::sleep(Duration::from_secs_f64(ZONE_PACING_S)).await;
         }
+        pixels_sent += (*w as u64) * (*h as u64);
+        zones.push(ZoneRecord::new(*x as u16, *y as u16, *w as u16, *h as u16, pixels_rgb565));
     }
+    let zones_sent = zones.len() as u32;
+
+    // Protocol v2: ONE FramePatch message per push — the whole bundle
+    // DEFLATE-compressed as a single zlib stream (raw fallback inside
+    // pack_for() when compression does not pay). Compression is a
+    // negotiated capability: a device that did not set CAP_DEFLATE in
+    // its DeviceHello (or has not said hello at all) gets the raw
+    // bundle, never a stream it cannot inflate. No per-zone messages,
+    // no pacing: the pacing delay of the old path (2 ms x up to 160
+    // zone messages per full frame) is gone entirely.
+    let patch = FramePatch { frame_seq, full_frame: should_send_full, zones };
+    let (packet, _compressed) = patch.pack_for(supports_compression);
+    let wire_bytes = packet.len() as u64;
+    let _ = ws_sender.send(WsMessage::Binary(packet));
 
     // Phase 3: short-lived write-back of frame and stream stats.
+    // Wire accounting uses the ACTUAL packet length — the old code
+    // synthesized pixels*2 + 16/zone, which would have hidden the whole
+    // compression win on the Server page.
     let now = Instant::now();
-    let wire_bytes = pixels_sent * 2 + (zones_sent as u64) * (ZONE_HEADER_BYTES as u64);
     let push_ms = push_started.elapsed().as_secs_f64() * 1000.0;
     {
         let mut devices = state.devices.write().await;
         if let Some(session) = devices.get_mut(device_id) {
             session.last_frame = Some(Arc::new(frame));
+            session.frame_seq = frame_seq.wrapping_add(1);
             if should_send_full {
                 session.last_full_push = now;
             }
@@ -1204,6 +1227,12 @@ pub async fn handle_device_ws(
     state: Arc<AppState>,
 ) {
     let mut device_id = String::new();
+    // Versioning hint from the WS URL (`fw` / `proto` / `caps`): lets the
+    // session start with the right compression gate before DeviceHello
+    // arrives. The hello message, when it comes, overrides these.
+    let mut hint_fw: Option<String> = None;
+    let mut hint_proto: Option<u8> = None;
+    let mut hint_caps: Option<u32> = None;
     let callback = |req: &WsRequest, resp: WsResponse| {
         let uri = req.uri();
         let _query = uri.query().unwrap_or("");
@@ -1211,10 +1240,28 @@ pub async fn handle_device_ws(
             .map(|u| u.query_pairs().into_owned().collect())
             .unwrap_or_default();
 
-        let id = query_pairs.get("mac").or_else(|| query_pairs.get("id")).cloned().unwrap_or_else(|| {
-            format!("yello-{}", addr.ip().to_string().replace('.', "-"))
-        });
+        // Identity params, most specific first. `device_id` is what the
+        // firmware has always sent (?device_id=<MAC>); it was not read
+        // until Nov 2026, so screens were identified by the IP fallback
+        // below. Existing `mac`/`id` callers keep priority so their
+        // identity does not change.
+        let id = query_pairs
+            .get("mac")
+            .or_else(|| query_pairs.get("id"))
+            .or_else(|| query_pairs.get("device_id"))
+            .cloned()
+            .unwrap_or_else(|| {
+                format!("yello-{}", addr.ip().to_string().replace('.', "-"))
+            });
         device_id = id;
+        let (fw, proto, caps) = parse_hello_hint(
+            query_pairs.get("fw").map(|s| s.as_str()),
+            query_pairs.get("proto").map(|s| s.as_str()),
+            query_pairs.get("caps").map(|s| s.as_str()),
+        );
+        hint_fw = fw;
+        hint_proto = proto;
+        hint_caps = caps;
         Ok(resp)
     };
 
@@ -1246,6 +1293,31 @@ pub async fn handle_device_ws(
     // stayed at the first-ever connection forever).
     {
         let mut studio = state.studio.write().await;
+        // One-time identity migration (Nov 2026): before `device_id` was
+        // read, this device's screen was registered under the IP fallback
+        // id (`yello-<ip>`). If that legacy entry exists and the device
+        // now arrives with its real (MAC) id, move the entry over —
+        // preserving its design assignment and any custom name — instead
+        // of orphaning it and starting a fresh default screen.
+        let legacy_id = format!("yello-{}", addr.ip().to_string().replace('.', "-"));
+        if device_id != legacy_id && !studio.screens.contains_key(&device_id) {
+            if let Some(mut screen) = studio.screens.remove(&legacy_id) {
+                eprintln!(
+                    "device identity migration: screen {legacy_id} -> {device_id} (design {} preserved)",
+                    screen.design_id
+                );
+                let auto_name = format!("Yello {}", &legacy_id[legacy_id.len().saturating_sub(6)..]);
+                if screen.name == auto_name {
+                    screen.name = format!("Yello {}", &device_id[device_id.len().saturating_sub(6)..]);
+                }
+                screen.id = device_id.clone();
+                screen.last_seen = Utc::now().to_rfc3339();
+                studio.screens.insert(device_id.clone(), screen);
+                drop(studio);
+                state.save_studio_file().await;
+                studio = state.studio.write().await;
+            }
+        }
         match studio.screens.get_mut(&device_id) {
             Some(screen) => {
                 screen.last_seen = Utc::now().to_rfc3339();
@@ -1306,9 +1378,22 @@ pub async fn handle_device_ws(
                 nav_stack: Vec::new(),
                 last_interaction: Instant::now(),
                 ws_sender: Some(tx.clone()),
+                frame_seq: 0,
+                firmware_version: hint_fw.clone(),
+                device_proto_version: hint_proto,
+                capabilities: hint_caps.unwrap_or(0),
+                supports_compression: hint_caps.map(|c| c & CAP_DEFLATE != 0).unwrap_or(false),
+                hello_received: false,
                 push_lock: Arc::new(Mutex::new(())),
                 last_tick: Instant::now(),
             },
+        );
+    }
+    if hint_fw.is_some() || hint_proto.is_some() || hint_caps.is_some() {
+        eprintln!(
+            "device {device_id} connected with version hint: fw={:?} proto={:?} caps={:?} (compression {})",
+            hint_fw, hint_proto, hint_caps,
+            if hint_caps.map(|c| c & CAP_DEFLATE != 0).unwrap_or(false) { "on" } else { "off" }
         );
     }
 
@@ -1319,7 +1404,49 @@ pub async fn handle_device_ws(
     while let Some(Ok(msg)) = ws_stream_rx.next().await {
         match msg {
             WsMessage::Binary(data) => {
-                if data.len() >= 3 && data[0] == PROTO_MAGIC && data[1] == PROTO_VERSION {
+                // DeviceHello is handled BEFORE the protocol-version gate:
+                // its whole job is to tell the server which protocol and
+                // firmware this device runs, including a future version
+                // this server does not speak yet.
+                if data.len() >= 3 && data[0] == PROTO_MAGIC && data[2] == MsgType::DeviceHello as u8 {
+                    if let Ok(hello) = DeviceHello::unpack(&data) {
+                        let was_unknown = {
+                            let mut devices = state.devices.write().await;
+                            match devices.get_mut(&device_id) {
+                                Some(session) => {
+                                    let first_hello = !session.hello_received;
+                                    session.firmware_version = Some(hello.firmware_version());
+                                    session.device_proto_version = Some(hello.proto_version);
+                                    session.capabilities = hello.capabilities;
+                                    session.supports_compression = hello.supports_compression();
+                                    session.hello_received = true;
+                                    first_hello
+                                }
+                                None => false,
+                            }
+                        };
+                        eprintln!(
+                            "device {device_id} hello: fw={} proto={} caps={:#x} compression={} display={}x{}",
+                            hello.firmware_version(),
+                            hello.proto_version,
+                            hello.capabilities,
+                            if hello.supports_compression() { "on" } else { "off" },
+                            hello.display_width,
+                            hello.display_height
+                        );
+                        // If the initial push went out before we knew the
+                        // device's capabilities (no URL hint), it was raw.
+                        // A compression-capable device now gets a proper
+                        // compressed full frame once.
+                        if was_unknown && hello.supports_compression() {
+                            let st = state.clone();
+                            let dev = device_id.clone();
+                            tokio::spawn(async move {
+                                let _ = push_frame(&st, &dev, true).await;
+                            });
+                        }
+                    }
+                } else if data.len() >= 3 && data[0] == PROTO_MAGIC && data[1] == PROTO_VERSION {
                     match data[2] {
                         2 => {
                             // TouchEvent
@@ -1336,6 +1463,22 @@ pub async fn handle_device_ws(
                                     session.wifi_rssi_dbm = Some(status.wifi_rssi_dbm);
                                     session.last_ping_at = Utc::now().to_rfc3339();
                                 }
+                            }
+                        }
+                        7 => {
+                            // ResyncRequest (protocol v2): the device dropped
+                            // or failed to decode a patch. Forget its last
+                            // frame and answer with a full-frame patch.
+                            if let Ok(req) = ResyncRequest::unpack(&data) {
+                                eprintln!(
+                                    "device {device_id} requested resync: reason={:?} last_good_seq={}",
+                                    req.reason, req.last_good_seq
+                                );
+                                let st = state.clone();
+                                let dev = device_id.clone();
+                                tokio::spawn(async move {
+                                    let _ = push_frame(&st, &dev, true).await;
+                                });
                             }
                         }
                         _ => {}
@@ -1935,6 +2078,10 @@ pub async fn handle_http_request(
                         "wifiRssiDbm": s.wifi_rssi_dbm,
                         "uptimeMs": s.uptime_ms,
                     })),
+                    "firmwareVersion": session.and_then(|s| s.firmware_version.clone()),
+                    "protoVersion": session.and_then(|s| s.device_proto_version),
+                    "capabilities": session.map(|s| s.capabilities),
+                    "supportsCompression": session.map(|s| s.supports_compression),
                 }));
             }
 
@@ -1958,7 +2105,12 @@ pub async fn handle_http_request(
                     "lastPushMs": session.last_push_ms,
                     "lastFrameAt": session.last_frame_at,
                     "wifiRssiDbm": session.wifi_rssi_dbm,
-                    "uptimeMs": session.uptime_ms
+                    "uptimeMs": session.uptime_ms,
+                    "firmwareVersion": session.firmware_version,
+                    "protoVersion": session.device_proto_version,
+                    "capabilities": session.capabilities,
+                    "supportsCompression": session.supports_compression,
+                    "helloReceived": session.hello_received
                 }));
             }
 
@@ -2261,12 +2413,19 @@ pub async fn handle_http_request(
                         "pixels": s.total_pixels,
                         "zoneMessages": s.total_zone_messages,
                         "hasFrame": s.last_frame.is_some(),
+                        "firmwareVersion": s.firmware_version,
+                        "protoVersion": s.device_proto_version,
+                        "capabilities": s.capabilities,
+                        "supportsCompression": s.supports_compression,
+                        "helloReceived": s.hello_received,
                     })
                 })
                 .collect();
             connections.sort_by(|a, b| a["screenId"].as_str().cmp(&b["screenId"].as_str()));
             json_response(StatusCode::OK, &json!({
                 "version": env!("CARGO_PKG_VERSION"),
+                "protoVersion": PROTO_VERSION,
+                "capabilities": CAPS_CURRENT,
                 "uptimeSeconds": state.started.elapsed().as_secs(),
                 "processMemoryBytes": proc_self_rss_bytes(),
                 "systemMemory": proc_meminfo(),

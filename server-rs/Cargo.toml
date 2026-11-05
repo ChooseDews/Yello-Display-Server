@@ -30,3 +30,7 @@ base64 = "0.21"
 qrcode = { version = "0.14", default-features = false }
 hyper = { version = "0.14.32", features = ["full"] }
 ab_glyph = "0.2.29"
+# FramePatch compression: zlib-rs backend on purpose - it honours
+# window_bits=12 (4 KiB window for the ESP32 decoder); the default
+# rust_backend/miniz_oxide silently ignores window_bits in flate2 1.1.x.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
