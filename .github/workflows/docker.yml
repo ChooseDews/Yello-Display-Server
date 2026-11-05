@@ -46,6 +46,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # firmware-latest is republished by the "Build and package"
+          # workflow on the same push this run belongs to, and the two
+          # workflows race: without a wait this step can download the
+          # PREVIOUS build's firmware (Nov 4, 2026: the f8b49bd image
+          # bundled the v1 firmware because the release refreshed ~3 min
+          # after this step ran). On push events, wait until the release
+          # is at least as fresh as HEAD before downloading. The wait is
+          # soft — on timeout we warn and bundle whatever exists rather
+          # than fail the image build (PR and dispatch runs never refresh
+          # the release, so they skip the wait entirely).
+          if [ "${{ github.event_name }}" = "push" ]; then
+            head_epoch=$(git log -1 --format=%ct)
+            for attempt in $(seq 1 40); do
+              rel=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/firmware-latest" --jq .updated_at 2>/dev/null || echo "")
+              if [ -n "$rel" ] && [ "$(date -u -d "$rel" +%s)" -ge "$head_epoch" ]; then
+                echo "firmware-latest ($rel) is fresh for HEAD."
+                break
+              fi
+              if [ "$attempt" = "40" ]; then
+                echo "::warning::firmware-latest still older than HEAD after ~20 min; bundling it anyway."
+              else
+                echo "firmware-latest ($rel) predates HEAD; waiting for the firmware build to republish it…"
+                sleep 30
+              fi
+            done
+          fi
           mkdir -p server-rs/static/firmware
           if gh release download firmware-latest --repo "$GITHUB_REPOSITORY" \
               --pattern "*.bin" --pattern "flasher_args.json" \
