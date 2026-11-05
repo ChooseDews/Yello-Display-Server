@@ -34,10 +34,10 @@ void display_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t 
  * the caller may safely release the buffer after it returns. */
 void display_draw_bitmap(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16_t *pixels);
 
-/* Starts the background task that dequeues and blits server-pushed zone updates. */
+/* Starts the background task that applies queued DeviceConfig
+ * (orientation) messages. Frame pixels are blitted by the patch decode
+ * task (frame_patch.c) via display_draw_bitmap directly. */
 void display_start_render_task(void);
 
-/* Copies a complete yello_zone_header_t + payload message onto the render queue.
- * Applies short back-pressure during full-frame bursts; returns false only if
- * the LCD cannot free a queue slot within the bounded wait. */
-bool display_enqueue_zone_update(const uint8_t *data, size_t len);
+/* Copies a complete yello_device_config_t message onto the config queue. */
+bool display_enqueue_device_config(const uint8_t *data, size_t len);

@@ -6,6 +6,7 @@
 
 #include "display.h"
 #include "boot_screen.h"
+#include "frame_patch.h"
 #include "device_config.h"
 #include "protocol.h"
 #include "setup_screen.h"
@@ -73,6 +74,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "starting render task");
     display_start_render_task();
+    frame_patch_init();
 
     ESP_LOGI(TAG, "connecting to websocket server");
     boot_screen_set_server(BOOT_STATUS_CONNECTING);

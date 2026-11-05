@@ -199,62 +199,41 @@ void display_draw_bitmap(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const u
     xSemaphoreGive(s_display_mutex);
 }
 
-#define ZONE_QUEUE_DEPTH 16
+#define CONFIG_QUEUE_DEPTH 4
 
 typedef struct {
     uint8_t *data;
     size_t len;
-} zone_update_msg_t;
+} config_msg_t;
 
-static QueueHandle_t s_zone_queue = NULL;
+static QueueHandle_t s_config_queue = NULL;
 
+/* Since protocol v2, frame pixels arrive through the patch decode task
+ * (frame_patch.c), which blits strips via display_draw_bitmap directly.
+ * This task remains only for DeviceConfig (orientation) messages, whose
+ * handling must stay off the WebSocket event task. */
 static void render_task(void *arg)
 {
-    zone_update_msg_t msg;
+    (void)arg;
+    config_msg_t msg;
     while (1) {
-        if (xQueueReceive(s_zone_queue, &msg, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_config_queue, &msg, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
-        if (msg.len >= 3 && msg.data[0] == YELLO_PROTO_MAGIC &&
+        if (msg.len == sizeof(yello_device_config_t) && msg.data[0] == YELLO_PROTO_MAGIC &&
             msg.data[1] == YELLO_PROTO_VERSION && msg.data[2] == YELLO_MSG_DEVICE_CONFIG) {
-            if (msg.len == sizeof(yello_device_config_t)) {
-                const yello_device_config_t *config = (const yello_device_config_t *)msg.data;
-                bool landscape = config->orientation == YELLO_ORIENTATION_LANDSCAPE;
-                uint16_t expected_width = landscape ? DISPLAY_LANDSCAPE_WIDTH : DISPLAY_WIDTH;
-                uint16_t expected_height = landscape ? DISPLAY_LANDSCAPE_HEIGHT : DISPLAY_HEIGHT;
-                if (config->width == expected_width && config->height == expected_height) {
-                    display_set_orientation(landscape);
-                } else {
-                    ESP_LOGW(TAG, "invalid orientation dimensions %ux%u", config->width, config->height);
-                }
+            const yello_device_config_t *config = (const yello_device_config_t *)msg.data;
+            bool landscape = config->orientation == YELLO_ORIENTATION_LANDSCAPE;
+            uint16_t expected_width = landscape ? DISPLAY_LANDSCAPE_WIDTH : DISPLAY_WIDTH;
+            uint16_t expected_height = landscape ? DISPLAY_LANDSCAPE_HEIGHT : DISPLAY_HEIGHT;
+            if (config->width == expected_width && config->height == expected_height) {
+                display_set_orientation(landscape);
+            } else {
+                ESP_LOGW(TAG, "invalid orientation dimensions %ux%u", config->width, config->height);
             }
-            free(msg.data);
-            continue;
-        }
-
-        const yello_zone_header_t *hdr = (const yello_zone_header_t *)msg.data;
-        size_t expected_len = sizeof(*hdr) + hdr->payload_len;
-        if (msg.len < sizeof(*hdr) || msg.len != expected_len ||
-            hdr->magic != YELLO_PROTO_MAGIC || hdr->version != YELLO_PROTO_VERSION ||
-            hdr->msg_type != YELLO_MSG_ZONE_UPDATE) {
-            ESP_LOGW(TAG, "dropping malformed zone update (len=%u)", (unsigned)msg.len);
-            free(msg.data);
-            continue;
-        }
-
-        bool bounds_valid = hdr->w > 0 && hdr->h > 0 &&
-                            hdr->x < s_logical_width && hdr->y < s_logical_height &&
-                            hdr->w <= s_logical_width - hdr->x &&
-                            hdr->h <= s_logical_height - hdr->y;
-        uint32_t expected_payload_len = bounds_valid ? (uint32_t)hdr->w * (uint32_t)hdr->h * 2U : 0;
-        if (hdr->format == YELLO_FMT_RAW_RGB565 && bounds_valid &&
-            hdr->payload_len == expected_payload_len) {
-            ESP_LOGD(TAG, "blit x=%u y=%u w=%u h=%u", hdr->x, hdr->y, hdr->w, hdr->h);
-            display_draw_bitmap(hdr->x, hdr->y, hdr->w, hdr->h, (const uint16_t *)(msg.data + sizeof(*hdr)));
         } else {
-            ESP_LOGW(TAG, "dropping invalid zone update format=%d x=%u y=%u w=%u h=%u payload_len=%u",
-                     hdr->format, hdr->x, hdr->y, hdr->w, hdr->h, (unsigned)hdr->payload_len);
+            ESP_LOGW(TAG, "dropping malformed queued message (len=%u)", (unsigned)msg.len);
         }
 
         free(msg.data);
@@ -263,24 +242,21 @@ static void render_task(void *arg)
 
 void display_start_render_task(void)
 {
-    s_zone_queue = xQueueCreate(ZONE_QUEUE_DEPTH, sizeof(zone_update_msg_t));
+    s_config_queue = xQueueCreate(CONFIG_QUEUE_DEPTH, sizeof(config_msg_t));
     xTaskCreate(render_task, "display_render", 4096, NULL, 5, NULL);
 }
 
-bool display_enqueue_zone_update(const uint8_t *data, size_t len)
+bool display_enqueue_device_config(const uint8_t *data, size_t len)
 {
     uint8_t *copy = malloc(len);
     if (!copy) {
-        ESP_LOGW(TAG, "oom copying zone update (%u bytes)", (unsigned)len);
+        ESP_LOGW(TAG, "oom copying device config (%u bytes)", (unsigned)len);
         return false;
     }
     memcpy(copy, data, len);
 
-    zone_update_msg_t msg = { .data = copy, .len = len };
-    /* Back-pressure the WebSocket callback briefly while the LCD drains a
-     * reconnect/full-frame burst. Dropping one of those zones leaves stale
-     * pixels on screen until the next periodic full resync. */
-    if (xQueueSend(s_zone_queue, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
+    config_msg_t msg = { .data = copy, .len = len };
+    if (xQueueSend(s_config_queue, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
         free(copy);
         return false;
     }

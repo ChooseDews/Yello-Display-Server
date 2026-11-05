@@ -16,3 +16,13 @@ bool ws_client_send_touch(uint8_t touch_type, uint16_t x, uint16_t y);
 
 /* Application heartbeat carrying uptime and current WiFi RSSI. */
 bool ws_client_send_status(int16_t wifi_rssi_dbm);
+
+/* Protocol v2: ask the server for a full-frame resync after a dropped
+ * or undecodable FramePatch. reason is a yello_resync_reason_t. */
+bool ws_client_send_resync(uint8_t reason, uint32_t last_good_seq);
+
+/* Versioning handshake: report firmware version, protocol version and
+ * capability bitmask (yello_device_hello_t) to the server. Sent
+ * automatically on every (re)connect; the server gates DEFLATE
+ * compression on the YELLO_CAP_DEFLATE capability bit. */
+bool ws_client_send_hello(void);
