@@ -54,60 +54,156 @@ export async function renderAboutPage() {
   } catch { /* the static blurb stays */ }
 }
 
-// The ESP32 web flasher lives on the Devices page. The firmware binaries
-// and manifest.json are bundled into the server image by CI (from the
-// repo's rolling firmware-latest release); when they are absent the
-// flasher card says so instead of offering a dead button. The flashing
-// itself is ESP Web Tools (Web Serial), vendored locally and loaded
-// lazily: the library installs document-level handlers that swallow
-// clicks on the page's other links, so it loads only when the user goes
-// to flash. Probed once.
-let flashProbed = false;
+// The ESP32 web flasher lives on the Devices page. The server does NOT
+// bundle firmware (it used to, via a CI download of the firmware-latest
+// release — a race between the firmware and Docker workflows shipped a
+// stale bin once, and the bundling existed only to feed this button).
+// Instead the user provides the .bin: the card links the GitHub release
+// to download it from, the user picks the file(s) here, and the page
+// builds an ESP Web Tools manifest in memory (blob URLs) from what was
+// picked. Two shapes are accepted:
+//   - yello_device.bin alone: an app-only update at 0x10000, for a board
+//     already running Yello (bootloader + partitions are unchanged).
+//   - the full release set incl. flasher_args.json (bootloader.bin,
+//     partition-table.bin, yello_device.bin): offsets come from
+//     flasher_args.json, so a blank board works too.
+// The flashing itself is ESP Web Tools (Web Serial), vendored locally
+// and loaded lazily: the library installs document-level handlers that
+// swallow clicks on the page's other links, so it loads only when the
+// user actually goes to flash.
+const FIRMWARE_RELEASE_PAGE = "https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest";
+const FIRMWARE_APP_BIN_URL = "https://github.com/ChooseDews/Yello-Display-Server/releases/download/firmware-latest/yello_device.bin";
+const APP_BIN_OFFSET = 65536; // 0x10000 per flasher_args.json
+const APP_BIN_MAX_BYTES = 4 * 1024 * 1024;
+let flashReady = false;
+let flashParts = []; // [{ file, offset }]
+let flashBlobUrls = [];
+
+function flashClearBlobs() {
+  for (const url of flashBlobUrls) URL.revokeObjectURL(url);
+  flashBlobUrls = [];
+}
+
+async function flashParseSelection(fileList) {
+  const files = [...fileList];
+  const byName = new Map(files.map((f) => [f.name, f]));
+  const argsFile = byName.get("flasher_args.json");
+  if (argsFile) {
+    const args = JSON.parse(await argsFile.text());
+    const entries = Object.entries(args.flash_files || {});
+    if (!entries.length) throw new Error("flasher_args.json lists no flash files.");
+    const parts = [];
+    for (const [offsetHex, path] of entries) {
+      const name = path.split("/").pop();
+      const file = byName.get(name);
+      if (!file) throw new Error(`Missing ${name} — select every file from the release, including flasher_args.json.`);
+      parts.push({ file, offset: parseInt(offsetHex, 16) });
+    }
+    parts.sort((a, b) => a.offset - b.offset);
+    return { parts, full: true };
+  }
+  if (files.length === 1 && files[0].name === "yello_device.bin") {
+    if (!files[0].size || files[0].size > APP_BIN_MAX_BYTES) {
+      throw new Error(`That file is ${files[0].size} bytes — yello_device.bin should be a few hundred KB.`);
+    }
+    return { parts: [{ file: files[0], offset: APP_BIN_OFFSET }], full: false };
+  }
+  throw new Error("Pick either yello_device.bin on its own (app-only update), or the full release set including flasher_args.json.");
+}
+
 async function initFlasher() {
-  if (flashProbed) return;
-  flashProbed = true;
+  if (flashReady) return;
+  flashReady = true;
   const region = $("flash-region");
   const badge = $("flash-state");
-  let manifest = null;
-  try {
-    const response = await fetch("/static/firmware/manifest.json", { cache: "no-store" });
-    if (response.ok) manifest = await response.json();
-  } catch { /* treated as not bundled */ }
-  if (!manifest?.builds?.length) {
-    badge.textContent = "Not bundled";
-    region.replaceChildren();
-    const note = document.createElement("p");
-    note.className = "form-help";
-    note.textContent = "This server image does not have a firmware build bundled yet. Firmware is attached automatically once the repo's firmware-latest release exists and a new server image is built; until then, flash from the release page with esptool.";
-    region.append(note);
-    return;
-  }
-  badge.textContent = "Firmware ready";
+  badge.textContent = "You provide the .bin";
   region.replaceChildren();
-  const start = document.createElement("button");
-  start.type = "button";
-  start.className = "primary-button";
-  start.textContent = "Connect & install firmware";
-  // Never disabled: when Web Serial is unavailable (Safari, or an insecure
-  // origin) the loaded install button explains that itself via its slots.
-  start.addEventListener("click", () => {
-    start.disabled = true;
-    start.textContent = "Loading the flasher\u2026";
+
+  const intro = document.createElement("p");
+  intro.className = "form-help";
+  intro.textContent = "The server doesn't carry firmware. Download the .bin from GitHub, then provide it here:";
+  const download = document.createElement("div");
+  download.className = "settings-actions";
+  const dlApp = document.createElement("a");
+  dlApp.className = "secondary-button";
+  dlApp.href = FIRMWARE_APP_BIN_URL;
+  dlApp.textContent = "Download yello_device.bin";
+  const dlRelease = document.createElement("a");
+  dlRelease.className = "assign-button";
+  dlRelease.href = FIRMWARE_RELEASE_PAGE;
+  dlRelease.target = "_blank";
+  dlRelease.rel = "noopener";
+  dlRelease.textContent = "Release page (full set for a blank board)";
+  download.append(dlApp, dlRelease);
+
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.multiple = true;
+  picker.accept = ".bin,.json";
+  picker.setAttribute("aria-label", "Firmware files");
+  const summary = document.createElement("p");
+  summary.className = "form-help";
+  summary.textContent = "No file chosen yet. yello_device.bin alone updates a board already running Yello; add bootloader.bin, partition-table.bin and flasher_args.json from the same release for a blank board.";
+
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "primary-button";
+  go.textContent = "Connect & install firmware";
+  go.disabled = true;
+
+  picker.addEventListener("change", async () => {
+    flashParts = [];
+    go.disabled = true;
+    badge.textContent = "You provide the .bin";
+    if (!picker.files.length) return;
+    try {
+      const { parts, full } = await flashParseSelection(picker.files);
+      flashParts = parts;
+      summary.textContent = parts
+        .map((p) => `${p.file.name} → 0x${p.offset.toString(16)} (${Math.round(p.file.size / 1024)} KB)`)
+        .join(" · ") + (full ? "" : " — app-only update; the board must already run Yello.");
+      badge.textContent = "Ready to flash";
+      go.disabled = false;
+    } catch (error) {
+      summary.textContent = error.message;
+      badge.textContent = "Check the files";
+    }
+  });
+
+  // The button stays enabled once files parse: when Web Serial is
+  // unavailable (Safari, or an insecure origin) the loaded install
+  // button explains that itself via its slots.
+  go.addEventListener("click", () => {
+    if (!flashParts.length) return;
+    go.disabled = true;
+    go.textContent = "Loading the flasher\u2026";
+    const fail = (message) => {
+      badge.textContent = "Flasher unavailable";
+      summary.textContent = message;
+      go.disabled = false;
+      go.textContent = "Connect & install firmware";
+    };
     const script = document.createElement("script");
     script.type = "module";
     script.src = "/static/vendor/esp-web-tools/dist/web/install-button.js";
-    script.addEventListener("error", () => {
-      badge.textContent = "Flasher unavailable";
-      region.replaceChildren();
-      const note = document.createElement("p");
-      note.className = "form-help";
-      note.textContent = "The ESP Web Tools script could not be loaded from this server. You can still flash the same binaries from the firmware-latest release with esptool.";
-      region.append(note);
-    });
+    script.addEventListener("error", () => fail("The ESP Web Tools script could not be loaded from this server. The same files flash fine with esptool."));
     document.head.append(script);
     customElements.whenDefined("esp-web-install-button").then(() => {
+      flashClearBlobs();
+      const parts = flashParts.map((p) => {
+        const url = URL.createObjectURL(p.file);
+        flashBlobUrls.push(url);
+        return { path: url, offset: p.offset };
+      });
+      const manifest = {
+        name: "Yello Device",
+        version: "user-provided",
+        builds: [{ chipFamily: "ESP32", parts }],
+      };
+      const manifestUrl = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/json" }));
+      flashBlobUrls.push(manifestUrl);
       const install = document.createElement("esp-web-install-button");
-      install.setAttribute("manifest", "/static/firmware/manifest.json");
+      install.setAttribute("manifest", manifestUrl);
       const activate = document.createElement("button");
       activate.slot = "activate";
       activate.className = "primary-button";
@@ -124,9 +220,10 @@ async function initFlasher() {
       install.append(activate, unsupported, notAllowed);
       region.replaceChildren(install);
       activate.click();
-    });
+    }).catch(() => fail("The flasher failed to start. The same files flash fine with esptool."));
   });
-  region.append(start);
+
+  region.append(intro, download, picker, summary, go);
 }
 
 // ---------- Server page ----------

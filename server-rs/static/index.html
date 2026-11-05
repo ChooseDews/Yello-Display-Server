@@ -208,16 +208,16 @@
     <section class="settings-card">
       <div class="settings-card-heading">
         <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-bolt"></use></svg></div>
-        <div><h2>Flash the Yello firmware</h2><p>Flash an ESP32 over USB.</p></div>
-        <span id="flash-state" class="integration-badge">Checking…</span>
+        <div><h2>Flash the Yello firmware</h2><p>Flash an ESP32 over USB with a .bin you provide.</p></div>
+        <span id="flash-state" class="integration-badge">You provide the .bin</span>
       </div>
       <div id="flash-region">
-        <p class="form-help">Checking whether this server has a firmware build bundled…</p>
+        <p class="form-help">Loading the flasher…</p>
       </div>
       <ul class="flash-notes">
         <li><strong>Chrome or Edge on a computer</strong> — no Web Serial in Safari/iOS.</li>
         <li>USB data cable, then pick the serial port (CH340/CP210x). If it won't start, hold <strong>BOOT</strong>.</li>
-        <li>A full erase also clears the device's saved Wi-Fi. Same binaries for esptool: the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a>.</li>
+        <li>Firmware comes from the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a> on GitHub — the same files also flash with esptool. A full erase clears the device's saved Wi-Fi.</li>
       </ul>
     </section>
   </main>
