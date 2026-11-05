@@ -59,12 +59,30 @@ WiFi credentials + WS server host/port live in `sdkconfig` (gitignored) under
 "Yello Device Configuration". To watch serial output without a TTY:
 `sg dialout -c "stty -F /dev/ttyUSB0 115200 raw -echo && timeout 10 cat /dev/ttyUSB0"`.
 
-The firmware is a remote display: it connects to a WebSocket server, blits
-received zone updates (see `firmware/main/protocol.h`, mirrored byte-for-byte
-in `server-rs/src/protocol/mod.rs` — change together), and sends touch events
-back. Zone pixel payloads are big-endian RGB565 (ILI9341-native) so the device
-blits without swapping; headers are little-endian. Keep each zone message
-≤ ~480 px area (~1KB) to fit the esp_websocket_client RX buffer.
+The firmware is a remote display: it connects to a WebSocket server and
+renders server-pushed frames (see `firmware/main/protocol.h`, mirrored
+byte-for-byte in `server-rs/src/protocol/mod.rs` — change together), and
+sends touch events back. Protocol v2 (breaking, Nov 2026): one `FramePatch`
+WebSocket message per push carries every dirty zone record; the bundle is
+DEFLATE/zlib-compressed as a single stream at windowBits=12 (4 KiB
+dictionary), with a raw-bundle fallback when compression doesn't pay.
+Zone pixel payloads are big-endian RGB565 (ILI9341-native) so the device
+blits without swapping; headers are little-endian. The firmware never
+reassembles a whole patch: WS fragments stream through a queue into a
+decode task running vendored tinfl (miniz 3.0.2) with a 4 KiB wrapping
+dictionary, and pixels are blitted in ≤320×8 strips
+(`firmware/main/patch_stream.c`, host-tested in `firmware/host_test/`).
+Patches carry a `frame_seq`; a gap, inflate failure, or malformed patch
+makes the device send `ResyncRequest` and the server answers with a full
+frame. Small control messages (DeviceConfig/DeviceCommand) still
+reassemble into the 4 KiB WS buffer.
+Versioning: on connect the firmware sends `DeviceHello` (type 8) with
+its firmware version (`firmware/main/yello_version.h`, currently
+2.0.0), protocol version, and a capability bitmask — the same values
+also ride the WS URL as `fw`/`proto`/`caps`. The server records them
+on the session (exposed via `/api/studio` and `/api/server-stats`) and
+sends DEFLATE-compressed patches ONLY to devices whose capabilities
+include `CAP_DEFLATE`; unknown or non-DEFLATE devices get raw bundles.
 
 ## Server (`server-rs/`)
 

@@ -149,7 +149,7 @@ async fn test_static_index_serving() {
 }
 
 #[tokio::test]
-async fn test_websocket_stream_and_zones() {
+async fn test_websocket_stream_and_patch() {
     use tokio::io::duplex;
 
     let state = Arc::new(AppState::new(
@@ -202,6 +202,14 @@ async fn test_websocket_stream_and_zones() {
                     nav_stack: Vec::new(),
                     last_interaction: std::time::Instant::now(),
                     ws_sender: Some(tx),
+                    frame_seq: 0,
+                    // This harness acts as a current v2 device that has
+                    // completed the DeviceHello handshake with DEFLATE.
+                    firmware_version: Some("2.0.0".to_string()),
+                    device_proto_version: Some(2),
+                    capabilities: yello_server::CAPS_CURRENT,
+                    supports_compression: true,
+                    hello_received: true,
                     push_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                     last_tick: std::time::Instant::now(),
                 },
@@ -218,20 +226,127 @@ async fn test_websocket_stream_and_zones() {
     let client_ws = tokio_tungstenite::client_async("ws://localhost/ws", client_io).await.unwrap().0;
     let (_client_tx, mut client_rx) = client_ws.split();
 
-    // Client receives zone update messages
-    let mut received_zones = 0;
+    // Client receives ONE FramePatch message for the initial full push
+    // (protocol v2: bundled + compressed, not per-zone messages).
+    let mut patch: Option<(yello_server::FramePatch, bool)> = None;
+    let mut patch_wire_len = 0usize;
     while let Some(Ok(msg)) = client_rx.next().await {
         if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = msg {
-            if bytes.len() >= 16 && bytes[0] == PROTO_MAGIC && bytes[1] == PROTO_VERSION && bytes[2] == MsgType::ZoneUpdate as u8 {
-                received_zones += 1;
-                if received_zones >= 5 {
-                    break;
-                }
+            if bytes.len() >= yello_server::FRAME_PATCH_HEADER_BYTES
+                && bytes[0] == PROTO_MAGIC
+                && bytes[1] == PROTO_VERSION
+                && bytes[2] == MsgType::FramePatch as u8
+            {
+                patch_wire_len = bytes.len();
+                patch = Some(yello_server::FramePatch::unpack(&bytes).expect("patch must decode"));
+                break;
             }
         }
     }
 
-    assert!(received_zones >= 5);
+    let (patch, _compressed) = patch.expect("a FramePatch must arrive");
+    assert!(patch.full_frame, "initial push is a full frame");
+    assert_eq!(patch.frame_seq, 0);
+    let total_pixels: usize = patch.zones.iter().map(|z| z.w as usize * z.h as usize).sum();
+    assert_eq!(total_pixels, 240 * 320, "full frame covers the whole panel");
+    // The wire packet must be far smaller than the old raw per-zone total
+    // (240*320*2 pixel bytes + 160 zone headers = 156,160 bytes).
+    assert!(
+        patch_wire_len < 156_160 / 2,
+        "patch wire len {patch_wire_len} should show the compression win"
+    );
+
+    // Session accounting used the actual packet length and advanced seq.
+    {
+        let devices = state.devices.read().await;
+        let s = devices.get("test-device").unwrap();
+        assert_eq!(s.total_wire_bytes, patch_wire_len as u64);
+        assert_eq!(s.frame_seq, 1);
+        assert_eq!(s.frames_sent, 1);
+    }
+}
+
+#[tokio::test]
+async fn test_push_frame_raw_for_device_without_deflate_capability() {
+    // A device whose DeviceHello did NOT set CAP_DEFLATE (here: an old
+    // v2 build that only identified its firmware version) must receive
+    // the raw bundle — compression is negotiated, never assumed.
+    let state = Arc::new(AppState::new(
+        PathBuf::from("/tmp/test_studio_raw.json"),
+        PathBuf::from("/tmp/test_secrets_raw.json"),
+        static_dir(),
+    ));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<tokio_tungstenite::tungstenite::Message>();
+    {
+        let mut devices = state.devices.write().await;
+        devices.insert(
+            "raw-device".to_string(),
+            DeviceSession {
+                device_id: "raw-device".to_string(),
+                remote: "127.0.0.1:12346".to_string(),
+                last_frame: None,
+                last_full_push: std::time::Instant::now() - std::time::Duration::from_secs(400),
+                pressed: std::collections::HashSet::new(),
+                dots: Vec::new(),
+                connected_at: std::time::Instant::now(),
+                connected_since: chrono::Utc::now().to_rfc3339(),
+                stream_samples: std::collections::VecDeque::new(),
+                total_pixels: 0,
+                total_wire_bytes: 0,
+                total_zone_messages: 0,
+                frames_sent: 0,
+                last_push_ms: 0.0,
+                last_frame_at: chrono::Utc::now().to_rfc3339(),
+                orientation: "portrait".to_string(),
+                last_ping_at: chrono::Utc::now().to_rfc3339(),
+                wifi_rssi_dbm: None,
+                uptime_ms: 0,
+                active_design_id: DEFAULT_DESIGN_ID.to_string(),
+                active_page_id: DEFAULT_PAGE_ID.to_string(),
+                nav_stack: Vec::new(),
+                last_interaction: std::time::Instant::now(),
+                ws_sender: Some(tx),
+                frame_seq: 0,
+                firmware_version: Some("2.0.0".to_string()),
+                device_proto_version: Some(2),
+                capabilities: yello_server::CAP_RAW_BUNDLE | yello_server::CAP_FRAME_PATCH,
+                supports_compression: false,
+                hello_received: true,
+                push_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                last_tick: std::time::Instant::now(),
+            },
+        );
+    }
+
+    push_frame(&state, "raw-device", true).await.unwrap();
+
+    // First binary message could be a DeviceConfig if orientation
+    // differed; the FramePatch is the one that matters here.
+    let mut patch_bytes: Option<Vec<u8>> = None;
+    while let Ok(Some(msg)) = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+        if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = msg {
+            if bytes.len() >= 4 && bytes[2] == MsgType::FramePatch as u8 {
+                patch_bytes = Some(bytes.to_vec());
+                break;
+            }
+        }
+    }
+    let bytes = patch_bytes.expect("a FramePatch must arrive");
+    assert_eq!(bytes[3] & PATCH_FLAG_COMPRESSED, 0, "no-DEFLATE device must get a raw patch");
+    assert!(bytes.len() > 100_000, "raw full frame should be ~156 KB, got {}", bytes.len());
+    let (_patch, was_compressed) = FramePatch::unpack(&bytes).expect("raw patch must decode");
+    assert!(!was_compressed);
+
+    // The session's version info is visible through the Studio API.
+    let req = Request::builder().method(Method::GET).uri("/api/studio").body(Body::empty()).unwrap();
+    let resp = handle_http_request(req, state.clone()).await.unwrap();
+    let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+    let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let dev = &val["devices"][0];
+    assert_eq!(dev["firmwareVersion"], "2.0.0");
+    assert_eq!(dev["protoVersion"], 2);
+    assert_eq!(dev["supportsCompression"], false);
+    assert_eq!(dev["helloReceived"], true);
 }
 
 #[tokio::test]

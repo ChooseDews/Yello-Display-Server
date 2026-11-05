@@ -173,6 +173,12 @@ fn make_session(device_id: &str) -> DeviceSession {
         nav_stack: Vec::new(),
         last_interaction: std::time::Instant::now(),
         ws_sender: None,
+        frame_seq: 0,
+        firmware_version: None,
+        device_proto_version: None,
+        capabilities: 0,
+        supports_compression: false,
+        hello_received: false,
         push_lock: Arc::new(Mutex::new(())),
         last_tick: std::time::Instant::now(),
     }
