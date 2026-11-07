@@ -164,6 +164,15 @@ pub const FULL_RESYNC_INTERVAL_S: f64 = 300.0;
 pub const EXTERNAL_FETCH_TIMEOUT_S: u64 = 10;
 pub const DOT_LIFETIME_S: f64 = 4.0;
 pub const BUTTON_FLASH_S: f64 = 0.25;
+/// Click debounce: a second touch-Down from the SAME device at
+/// (nearly) the same spot within this window is treated as contact
+/// bounce and does not fire an element action. (The firmware
+/// debounces its touch edges too; this is the server-side guarantee,
+/// and it also covers older firmware.)
+pub const TOUCH_ACTION_DEBOUNCE_MS: u64 = 300;
+/// Coordinate slack for the click debounce: bounce presses jitter a
+/// few pixels around the original contact point.
+pub const TOUCH_DEBOUNCE_SLOP_PX: i32 = 12;
 /// Minimum delay before re-fetching an image URL whose last attempt failed,
 /// so broken links don't hammer the remote host every 2 s loop tick.
 pub const IMAGE_FETCH_RETRY_S: u64 = 30;
@@ -208,6 +217,12 @@ pub struct DeviceSession {
     pub nav_stack: Vec<(String, String)>,
     /// Last touch or navigation; drives the idle return-to-home.
     pub last_interaction: Instant,
+    /// (x, y, when) of the last click this device fired an element
+    /// action for; the click-debounce window compares against it.
+    /// Position-based (not element-based) so a bounce press that lands
+    /// after a navigation — on a different page's button at the same
+    /// spot — is swallowed too.
+    pub last_click: Option<(i32, i32, Instant)>,
     pub ws_sender: Option<mpsc::UnboundedSender<WsMessage>>,
     /// Next FramePatch sequence number for this device (protocol v2).
     /// Incremented once per patch actually sent; the device uses gaps
@@ -1377,6 +1392,7 @@ pub async fn handle_device_ws(
                 active_page_id: initial_page_id,
                 nav_stack: Vec::new(),
                 last_interaction: Instant::now(),
+                last_click: None,
                 ws_sender: Some(tx.clone()),
                 frame_seq: 0,
                 firmware_version: hint_fw.clone(),
@@ -1451,7 +1467,7 @@ pub async fn handle_device_ws(
                         2 => {
                             // TouchEvent
                             if let Ok(touch) = TouchEvent::unpack(&data) {
-                                handle_device_touch(&state, &device_id, touch.x as i32, touch.y as i32).await;
+                                handle_device_touch(&state, &device_id, touch.touch_type, touch.x as i32, touch.y as i32).await;
                             }
                         }
                         4 => {
@@ -1625,7 +1641,7 @@ pub async fn apply_navigation(state: &Arc<AppState>, device_id: &str, target: &s
     session.last_interaction = Instant::now();
 }
 
-async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: i32) {
+pub async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, kind: TouchType, x: i32, y: i32) {
     let (_design_id, layout) = {
         let studio = state.studio.read().await;
         let devices = state.devices.read().await;
@@ -1651,6 +1667,14 @@ async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: 
         }
     }
 
+    // Only the initial press is a click. Move and Up are part of the
+    // same tap — firing element actions on them as well made a single
+    // tap trigger an element two or three times (Down + Up, plus any
+    // Move whose coordinates jittered mid-press).
+    if kind != TouchType::Down {
+        return;
+    }
+
     // Add dot feedback
     {
         let mut devices = state.devices.write().await;
@@ -1662,10 +1686,24 @@ async fn handle_device_touch(state: &Arc<AppState>, device_id: &str, x: i32, y: 
     if let Some(hit) = renderer::hit_test_buttons(&layout, x, y) {
         let elem_id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-        // Visual flash feedback
+        // Click debounce + visual flash feedback. A re-press at the
+        // same spot inside the debounce window is contact bounce, not
+        // a second click: swallow it whole (no flash, no action). The
+        // check is position-based because the first press may have
+        // navigated to a page whose button sits at the same spot —
+        // the bounce must not fire that one either.
         {
             let mut devices = state.devices.write().await;
             if let Some(session) = devices.get_mut(device_id) {
+                if let Some((last_x, last_y, last_at)) = session.last_click {
+                    if (x - last_x).abs() <= TOUCH_DEBOUNCE_SLOP_PX
+                        && (y - last_y).abs() <= TOUCH_DEBOUNCE_SLOP_PX
+                        && last_at.elapsed() < Duration::from_millis(TOUCH_ACTION_DEBOUNCE_MS)
+                    {
+                        return;
+                    }
+                }
+                session.last_click = Some((x, y, Instant::now()));
                 session.pressed.insert(elem_id.clone());
             }
         }

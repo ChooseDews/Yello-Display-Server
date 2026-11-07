@@ -201,6 +201,7 @@ async fn test_websocket_stream_and_patch() {
                     active_page_id: DEFAULT_PAGE_ID.to_string(),
                     nav_stack: Vec::new(),
                     last_interaction: std::time::Instant::now(),
+                    last_click: None,
                     ws_sender: Some(tx),
                     frame_seq: 0,
                     // This harness acts as a current v2 device that has
@@ -305,6 +306,7 @@ async fn test_push_frame_raw_for_device_without_deflate_capability() {
                 active_page_id: DEFAULT_PAGE_ID.to_string(),
                 nav_stack: Vec::new(),
                 last_interaction: std::time::Instant::now(),
+                    last_click: None,
                 ws_sender: Some(tx),
                 frame_seq: 0,
                 firmware_version: Some("2.0.0".to_string()),

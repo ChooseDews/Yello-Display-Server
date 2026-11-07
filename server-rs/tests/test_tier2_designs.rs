@@ -172,6 +172,7 @@ fn make_session(device_id: &str) -> DeviceSession {
         active_page_id: DEFAULT_PAGE_ID.to_string(),
         nav_stack: Vec::new(),
         last_interaction: std::time::Instant::now(),
+        last_click: None,
         ws_sender: None,
         frame_seq: 0,
         firmware_version: None,
@@ -266,4 +267,58 @@ async fn cross_design_links_checked_at_save() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
     assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+}
+
+/// Regression: one physical tap arrives as Down + Move + Up, and used
+/// to fire the element action once per event — a navigation button
+/// tap could bounce the session forward and straight back. Only the
+/// Down may fire, and a bounce re-press at the same spot inside the
+/// debounce window is swallowed even though the first press navigated
+/// to a page with a different button at that spot.
+#[tokio::test]
+async fn touch_fires_once_per_tap() {
+    use yello_server::server::handle_device_touch;
+    use yello_server::TouchType;
+
+    let state = make_state();
+    let mut design = two_page_design();
+    design["pages"][1]["elements"] = json!([
+        {"type": "design-link", "id": "back", "frame": {"x": 0, "y": 0, "w": 240, "h": 60},
+         "style": {}, "props": {"label": "Back", "targetDesignId": "page:main"}}
+    ]);
+    let (status, _) = post(&state, "/api/layout?design=default", &design).await;
+    assert_eq!(status, StatusCode::OK);
+    state
+        .devices
+        .write()
+        .await
+        .insert("dev-tap".to_string(), make_session("dev-tap"));
+
+    // One tap, as the wire sees it: Down, a jittered Move, then Up.
+    handle_device_touch(&state, "dev-tap", TouchType::Down, 120, 30).await;
+    handle_device_touch(&state, "dev-tap", TouchType::Move, 121, 30).await;
+    handle_device_touch(&state, "dev-tap", TouchType::Up, 121, 30).await;
+    assert_eq!(
+        session_pos(&state, "dev-tap").await.1,
+        "second",
+        "one tap must navigate exactly once"
+    );
+
+    // Contact bounce: a second Down (1 px jitter) inside the window
+    // must not fire the new page's same-spot button.
+    handle_device_touch(&state, "dev-tap", TouchType::Down, 121, 30).await;
+    assert_eq!(
+        session_pos(&state, "dev-tap").await.1,
+        "second",
+        "bounce Down inside the debounce window must not fire"
+    );
+
+    // After the window, the same press is a genuine second tap.
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    handle_device_touch(&state, "dev-tap", TouchType::Down, 120, 30).await;
+    assert_eq!(
+        session_pos(&state, "dev-tap").await.1,
+        "main",
+        "a later deliberate tap must fire"
+    );
 }

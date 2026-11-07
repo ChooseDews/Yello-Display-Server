@@ -41,6 +41,7 @@ pub use server::{
     MAX_EXTERNAL_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, FULL_RESYNC_INTERVAL_S,
     wanted_image_sources, decode_image_bytes,
     EXTERNAL_FETCH_TIMEOUT_S, DOT_LIFETIME_S, BUTTON_FLASH_S, IMAGE_FETCH_RETRY_S,
+    TOUCH_ACTION_DEBOUNCE_MS, TOUCH_DEBOUNCE_SLOP_PX, handle_device_touch,
     push_frame, push_design, design_id_for_session, handle_http_request, handle_device_ws,
     start_background_tasks, write_atomic,
     active_target, home_target, apply_navigation, cross_design_link_errors,

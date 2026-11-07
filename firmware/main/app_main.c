@@ -9,6 +9,7 @@
 #include "frame_patch.h"
 #include "device_config.h"
 #include "protocol.h"
+#include "serial_config.h"
 #include "setup_screen.h"
 #include "touch.h"
 #include "wifi.h"
@@ -45,6 +46,11 @@ void app_main(void)
     touch_init();
 
     device_config_init_storage();
+    /* USB-serial configuration listens from here on — including while
+     * the touchscreen setup is up — so the web flasher can write the
+     * Wi-Fi/server settings right after flashing. A successful write
+     * saves to NVS and reboots the device into the new configuration. */
+    serial_config_start();
     yello_runtime_config_t device_config;
     bool persisted_config = device_config_load(&device_config);
     bool configured = device_config_is_valid(&device_config);
@@ -81,28 +87,53 @@ void app_main(void)
     ws_client_init(&device_config);
 
     led_set(false, false, true);
-    bool was_pressed = false;
 
+    /* Touch debounce: the XPT2046's pressed signal flickers as contact
+     * is made and broken (resistive bounce), and every extra DOWN the
+     * firmware emits fires the element under the finger again on the
+     * server — one physical tap could register as two clicks. A press
+     * or release therefore has to be seen on two consecutive polls
+     * (the loop polls every ~50 ms) before it is believed; a flicker
+     * back to the reported state cancels the pending transition
+     * instead of emitting anything. The server additionally gates
+     * actions to DOWN events and debounces repeats, so this is the
+     * first of two layers, not the only one. */
+    bool stable_pressed = false;  /* debounced state already reported */
+    bool pending_pressed = false; /* candidate state seen once so far */
+    bool has_pending = false;
     uint16_t last_x = 0, last_y = 0;
     TickType_t next_heartbeat = xTaskGetTickCount();
 
     while (1) {
-        uint16_t x, y;
+        uint16_t x = 0, y = 0;
         bool pressed = touch_poll(&x, &y);
-        if (pressed && !was_pressed) {
+        bool emit_down = false;
+        bool emit_up = false;
+        if (pressed == stable_pressed) {
+            has_pending = false; /* flicker died out; nothing to report */
+        } else if (!has_pending || pending_pressed != pressed) {
+            pending_pressed = pressed;
+            has_pending = true; /* first sighting: wait for confirmation */
+        } else {
+            stable_pressed = pressed; /* second sighting in a row: commit */
+            has_pending = false;
+            emit_down = stable_pressed;
+            emit_up = !stable_pressed;
+        }
+
+        if (emit_down) {
+            last_x = x;
+            last_y = y;
             ESP_LOGI(TAG, "touch down x=%u y=%u", x, y);
             ws_client_send_touch(YELLO_TOUCH_DOWN, x, y);
-        } else if (pressed && was_pressed && (x != last_x || y != last_y)) {
-            ws_client_send_touch(YELLO_TOUCH_MOVE, x, y);
-        } else if (!pressed && was_pressed) {
+        } else if (emit_up) {
             ESP_LOGI(TAG, "touch up x=%u y=%u", last_x, last_y);
             ws_client_send_touch(YELLO_TOUCH_UP, last_x, last_y);
-        }
-        if (pressed) {
+        } else if (stable_pressed && pressed && (x != last_x || y != last_y)) {
+            ws_client_send_touch(YELLO_TOUCH_MOVE, x, y);
             last_x = x;
             last_y = y;
         }
-        was_pressed = pressed;
 
         TickType_t now = xTaskGetTickCount();
         if ((int32_t)(now - next_heartbeat) >= 0) {
