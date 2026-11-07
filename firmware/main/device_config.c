@@ -82,6 +82,24 @@ bool device_config_load(yello_runtime_config_t *config)
     return true;
 }
 
+bool device_config_erase(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t result = nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND) {
+        return true; /* nothing saved: already erased */
+    }
+    if (result == ESP_OK) result = nvs_erase_all(handle);
+    if (result == ESP_OK) result = nvs_commit(handle);
+    if (handle) nvs_close(handle);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "failed to erase configuration: %s", esp_err_to_name(result));
+        return false;
+    }
+    ESP_LOGI(TAG, "erased saved configuration");
+    return true;
+}
+
 bool device_config_save(const yello_runtime_config_t *config)
 {
     if (!device_config_is_valid(config)) {

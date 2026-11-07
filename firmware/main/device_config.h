@@ -23,3 +23,7 @@ bool device_config_load(yello_runtime_config_t *config);
 
 bool device_config_is_valid(const yello_runtime_config_t *config);
 bool device_config_save(const yello_runtime_config_t *config);
+
+/* Erases every persisted setting, so the next boot falls back to the
+ * build defaults / first-boot setup. Returns true on success. */
+bool device_config_erase(void);

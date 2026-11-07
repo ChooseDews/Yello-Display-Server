@@ -105,6 +105,18 @@ is displayed. **Cancel** keeps the previously saved configuration.
 A fresh repository build intentionally has an empty SSID, so a newly flashed
 device enters setup.
 
+**Setup over USB instead:** the Studio's Devices page can write the same
+settings over the flashing cable — flash the firmware, then use the
+**Device settings over USB** card to send the Wi-Fi SSID/password and the
+server host/port. The device saves them to NVS and reboots into the new
+configuration; the touchscreen setup never appears. The firmware listens
+for this on UART0 (115200 8N1) whenever it is running: `YELLO_SET_CONFIG
+{"ssid":…,"password":…,"host":…,"port":…}` writes settings,
+`YELLO_GET_CONFIG` reports the current ones (never the password), and
+`YELLO_CLEAR_CONFIG` erases them. Anyone with physical USB access can
+reconfigure the device — that is the point of the port, and there is no
+other authentication on it.
+
 ## Yello Studio
 
 The designer supports text, clocks, external text, buttons, screen buttons,

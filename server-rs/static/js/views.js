@@ -287,6 +287,219 @@ async function initFlasher() {
   region.append(...bundledEls, intro, download, picker, summary, go);
 }
 
+// ---------- USB serial device configuration ----------
+// Companion to the firmware's serial_config listener (firmware 2.1.0+,
+// see firmware/main/serial_config.h): a running device accepts its
+// Wi-Fi credentials and server address over the same USB cable used
+// for flashing (UART0, 115200 8N1, line protocol) and saves them to
+// NVS, then reboots. This uses Web Serial directly — a separate port
+// session from the ESP Web Tools flasher, so it runs after that
+// dialog has closed and the device has booted into the app.
+const USB_CFG_STORAGE_KEY = "yelloUsbConfig";
+
+class UsbLineSession {
+  constructor(port) {
+    this.port = port;
+    this.buffer = "";
+    this.lines = [];
+    this.waiters = [];
+    this.closed = false;
+  }
+
+  async open() {
+    await this.port.open({ baudRate: 115200 });
+    this.writer = this.port.writable.getWriter();
+    this.reader = this.port.readable.getReader();
+    this.pumpDone = (async () => {
+      const decoder = new TextDecoder();
+      try {
+        while (!this.closed) {
+          const { value, done } = await this.reader.read();
+          if (done) break;
+          if (!value) continue;
+          this.buffer += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = this.buffer.indexOf("\n")) >= 0) {
+            const line = this.buffer.slice(0, idx).replace(/\r$/, "");
+            this.buffer = this.buffer.slice(idx + 1);
+            const waiter = this.waiters.shift();
+            if (waiter) waiter(line); else this.lines.push(line);
+          }
+        }
+      } catch { /* port closed, or the device rebooted mid-session */ }
+    })();
+  }
+
+  nextLine(timeoutMs) {
+    if (this.lines.length) return Promise.resolve(this.lines.shift());
+    return new Promise((resolve) => {
+      const waiter = (line) => { clearTimeout(timer); resolve(line); };
+      const timer = setTimeout(() => {
+        const at = this.waiters.indexOf(waiter);
+        if (at >= 0) this.waiters.splice(at, 1);
+        resolve(null);
+      }, timeoutMs);
+      this.waiters.push(waiter);
+    });
+  }
+
+  /* Wait for a line starting with one of prefixes; other lines (boot
+   * logs share the UART) are skipped. Optionally resend a command once
+   * after ~3 s — the device may still have been booting (or rebooted
+   * by the port opening) when the first copy was sent. */
+  async waitForReply(prefixes, timeoutMs, resendText) {
+    const deadline = Date.now() + timeoutMs;
+    let resent = false;
+    while (Date.now() < deadline) {
+      const line = await this.nextLine(Math.min(3000, deadline - Date.now()));
+      if (line === null) {
+        if (resendText && !resent) { resent = true; await this.send(resendText); }
+        continue;
+      }
+      if (prefixes.some((prefix) => line.startsWith(prefix))) return line;
+    }
+    return null;
+  }
+
+  async send(text) {
+    await this.writer.write(new TextEncoder().encode(text));
+  }
+
+  async close() {
+    this.closed = true;
+    try { await this.reader.cancel(); } catch { /* already closed */ }
+    try { this.reader.releaseLock(); } catch { /* ignore */ }
+    try { await this.writer.close(); } catch { /* ignore */ }
+    try { this.writer.releaseLock(); } catch { /* ignore */ }
+    try { await this.port.close(); } catch { /* ignore */ }
+  }
+}
+
+function usbParseReply(line) {
+  const at = line.indexOf(" ");
+  if (at < 0) return null;
+  try { return JSON.parse(line.slice(at + 1)); } catch { return null; }
+}
+
+/* Opens a port the user picks, runs fn(session), always closes. The
+ * hello handshake runs first: a device that never answers is either
+ * still booting, not a Yello board, or on pre-2.1.0 firmware. */
+async function usbWithDevice(fn) {
+  const port = await navigator.serial.requestPort();
+  const session = new UsbLineSession(port);
+  await session.open();
+  try {
+    await session.send("YELLO_HELLO\n");
+    const helloLine = await session.waitForReply(["YELLO_STATUS", "YELLO_ERROR"], 9000, "YELLO_HELLO\n");
+    const hello = helloLine && helloLine.startsWith("YELLO_STATUS") ? usbParseReply(helloLine) : null;
+    if (!hello) {
+      throw new Error("The device didn't answer. Give it a few seconds after flashing to boot, and make sure it runs firmware 2.1.0 or newer (older firmware has no USB configuration).");
+    }
+    return await fn(session, hello);
+  } finally {
+    await session.close();
+  }
+}
+
+let usbCfgReady = false;
+function initUsbConfig() {
+  if (usbCfgReady) return;
+  usbCfgReady = true;
+  const badge = $("usb-config-state");
+  const result = $("usb-config-result");
+  const writeBtn = $("usb-write");
+  const readBtn = $("usb-read");
+  const ssidInput = $("usb-ssid");
+  const passwordInput = $("usb-password");
+  const hostInput = $("usb-host");
+  const portInput = $("usb-port");
+
+  // Prefill: last-used values (never the password), else guess the
+  // server address from how this page was reached — a LAN address or
+  // .local name is exactly what the device needs; a public hostname
+  // is not, so leave the field to the placeholder hint then.
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(USB_CFG_STORAGE_KEY) || "null"); } catch { saved = null; }
+  if (saved) {
+    ssidInput.value = saved.ssid || "";
+    hostInput.value = saved.host || "";
+    portInput.value = saved.port || 8885;
+  } else {
+    const host = window.location.hostname;
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.endsWith(".local") || !host.includes(".")) {
+      hostInput.value = host;
+    }
+    portInput.value = 8885;
+  }
+
+  if (!("serial" in navigator)) {
+    badge.textContent = "Needs Chrome or Edge";
+    result.textContent = "USB configuration needs Web Serial (Chrome or Edge on a computer).";
+    writeBtn.disabled = true;
+    readBtn.disabled = true;
+    return;
+  }
+  badge.textContent = "Ready";
+
+  const setBusy = (busy, label) => {
+    writeBtn.disabled = busy;
+    readBtn.disabled = busy;
+    if (label) result.textContent = label;
+  };
+
+  readBtn.addEventListener("click", async () => {
+    setBusy(true, "Talking to the device\u2026");
+    try {
+      const status = await usbWithDevice(async (_session, hello) => hello);
+      ssidInput.value = status.ssid || "";
+      hostInput.value = status.host || "";
+      portInput.value = status.port || 8885;
+      badge.textContent = `Firmware ${status.fw || "?"}`;
+      result.textContent = status.configured
+        ? `This device is configured: ${status.ssid} \u2192 ${status.host}:${status.port}${status.passwordSet ? " (password saved)" : " (no password saved)"}.`
+        : "This device has no saved settings yet — write some below.";
+    } catch (error) {
+      result.textContent = error.name === "NotFoundError" ? "No device selected." : error.message;
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  $("usb-config-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const ssid = ssidInput.value.trim();
+    const host = hostInput.value.trim();
+    const port = Number(portInput.value);
+    if (!ssid || !host || !Number.isInteger(port) || port < 1 || port > 65535) {
+      result.textContent = "SSID, server host, and a port between 1 and 65535 are all required.";
+      return;
+    }
+    const payload = { ssid, host, port };
+    if (passwordInput.value) payload.password = passwordInput.value;
+    setBusy(true, "Talking to the device\u2026");
+    try {
+      await usbWithDevice(async (session, hello) => {
+        await session.send(`YELLO_SET_CONFIG ${JSON.stringify(payload)}\n`);
+        const line = await session.waitForReply(["YELLO_OK", "YELLO_ERROR"], 6000);
+        if (!line) throw new Error("The device didn't confirm the save — unplug it, plug it back in, and try Read from device to see what it has.");
+        if (line.startsWith("YELLO_ERROR")) {
+          const parsed = usbParseReply(line);
+          throw new Error(`The device refused the settings: ${parsed?.error || "unknown error"}`);
+        }
+        return hello;
+      });
+      try { localStorage.setItem(USB_CFG_STORAGE_KEY, JSON.stringify({ ssid, host, port })); } catch { /* private mode */ }
+      passwordInput.value = "";
+      badge.textContent = "Settings written";
+      result.textContent = `Saved. The device is rebooting — it will join \u201c${ssid}\u201d and connect to ${host}:${port}. Watch the Devices list above for it to come online.`;
+    } catch (error) {
+      result.textContent = error.name === "NotFoundError" ? "No device selected." : error.message;
+    } finally {
+      setBusy(false);
+    }
+  });
+}
+
 // ---------- Server page ----------
 // Live stats from /api/server-stats, polled every 2 s while the page is
 // open; showPage stops the polling when the user navigates away.
@@ -505,6 +718,7 @@ export function selectScreen(screenId) {
 
 export function renderDevicePage() {
   initFlasher().catch(() => {});
+  initUsbConfig();
   const grid = $("device-grid");
   grid.replaceChildren();
   const online = S.studio.screens.filter((screen) => screen.connected).length;

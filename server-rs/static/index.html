@@ -216,9 +216,33 @@
       </div>
       <ul class="flash-notes">
         <li><strong>Chrome or Edge on a computer</strong> — no Web Serial in Safari/iOS.</li>
+        <li>After flashing, leave the board plugged in and write its Wi-Fi and server settings with <strong>Device settings over USB</strong> below — no touchscreen setup needed.</li>
         <li>USB data cable, then pick the serial port (CH340/CP210x). If it won't start, hold <strong>BOOT</strong>.</li>
         <li>The bundled firmware is pulled from the <a href="https://github.com/ChooseDews/Yello-Display-Server/releases/tag/firmware-latest" target="_blank" rel="noopener">firmware-latest release</a> on GitHub — the same files also flash with esptool. A full erase clears the device's saved Wi-Fi.</li>
       </ul>
+    </section>
+    <section class="settings-card">
+      <div class="settings-card-heading">
+        <div class="integration-logo"><svg class="ic" aria-hidden="true"><use href="#i-bolt"></use></svg></div>
+        <div><h2>Device settings over USB</h2><p>Write Wi-Fi and server settings to a display over its flashing cable.</p></div>
+        <span id="usb-config-state" class="integration-badge">After flashing</span>
+      </div>
+      <form id="usb-config-form" class="settings-form">
+        <label for="usb-ssid">Wi-Fi SSID</label>
+        <input id="usb-ssid" type="text" autocomplete="off" maxlength="32" placeholder="Your Wi-Fi network">
+        <label for="usb-password">Wi-Fi password</label>
+        <input id="usb-password" type="password" autocomplete="new-password" maxlength="63" placeholder="Leave blank to keep the saved password">
+        <label for="usb-host">Server host</label>
+        <input id="usb-host" type="text" autocomplete="off" maxlength="95" placeholder="e.g. 192.168.1.247">
+        <label for="usb-port">Server port</label>
+        <input id="usb-port" type="number" min="1" max="65535" step="1">
+        <p class="field-hint">Flash the firmware first, leave the board plugged in, then write the settings: the device saves them to its NVS and reboots onto your Wi-Fi. Needs firmware 2.1.0 or newer and Chrome or Edge on a computer. The password travels only over the cable to the device — this page never stores it.</p>
+        <div class="settings-actions">
+          <button id="usb-write" type="submit" class="primary-button">Write settings to device</button>
+          <button id="usb-read" type="button" class="assign-button">Read from device</button>
+          <span id="usb-config-result" class="subtle"></span>
+        </div>
+      </form>
     </section>
   </main>
 
