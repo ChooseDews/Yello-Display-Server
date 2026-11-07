@@ -23,7 +23,21 @@ typedef enum {
     YELLO_MSG_FRAME_PATCH = 6,    /* server -> device */
     YELLO_MSG_RESYNC_REQUEST = 7, /* device -> server */
     YELLO_MSG_DEVICE_HELLO = 8,   /* device -> server, first message after connect */
+    YELLO_MSG_OTA_OFFER = 9,      /* server -> device, JSON body (see below) */
+    YELLO_MSG_OTA_STATUS = 10,    /* device -> server, JSON body (see below) */
 } yello_msg_type_t;
+
+/* OTA messages (types 9/10) are small control messages like
+ * DeviceConfig/DeviceCommand — they reassemble into the 4 KiB WS
+ * buffer — but instead of a packed struct their payload is UTF-8 JSON
+ * right after the shared 3-byte header [magic, version, msg_type]
+ * (no length prefix, no trailing NUL; the WS message length bounds it):
+ *   OtaOffer  (server -> device):
+ *     {"version":"2.2.0","size":1234567,"sha256":"<64 hex chars>"}
+ *   OtaStatus (device -> server):
+ *     {"state":"accepted|downloading|verifying|rebooting|failed",
+ *      "progress":<int percent, only for downloading>,
+ *      "error":"<short string, only for failed>"} */
 
 /* Device capability bits (yello_device_hello_t.capabilities, also sent
  * as the `caps` WebSocket URL param). The server must never send a
@@ -33,7 +47,8 @@ typedef enum {
 #define YELLO_CAP_RAW_BUNDLE  (1u << 0) /* raw FramePatch bundle (every v2 device) */
 #define YELLO_CAP_DEFLATE     (1u << 1) /* DEFLATE/zlib payloads (tinfl, 4 KiB window) */
 #define YELLO_CAP_FRAME_PATCH (1u << 2) /* FramePatch message (vs removed v1 ZoneUpdate) */
-#define YELLO_CAPS_CURRENT    (YELLO_CAP_RAW_BUNDLE | YELLO_CAP_DEFLATE | YELLO_CAP_FRAME_PATCH)
+#define YELLO_CAP_OTA         (1u << 3) /* OTA firmware update (OtaOffer/OtaStatus) */
+#define YELLO_CAPS_CURRENT    (YELLO_CAP_RAW_BUNDLE | YELLO_CAP_DEFLATE | YELLO_CAP_FRAME_PATCH | YELLO_CAP_OTA)
 
 typedef enum {
     YELLO_ORIENTATION_PORTRAIT = 0,

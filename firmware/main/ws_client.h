@@ -26,3 +26,9 @@ bool ws_client_send_resync(uint8_t reason, uint32_t last_good_seq);
  * automatically on every (re)connect; the server gates DEFLATE
  * compression on the YELLO_CAP_DEFLATE capability bit. */
 bool ws_client_send_hello(void);
+
+/* Sends an OtaStatus message: frames `json` (a NUL-terminated UTF-8
+ * JSON body, e.g. {"state":"accepted"}) with the 3-byte protocol
+ * header as YELLO_MSG_OTA_STATUS. Used by ota_client; returns false
+ * if not connected or the send fails. */
+bool ws_client_send_ota_status(const char *json);

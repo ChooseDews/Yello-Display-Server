@@ -1,9 +1,11 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_websocket_client.h"
 
@@ -14,6 +16,7 @@
 #include "display.h"
 #include "boot_screen.h"
 #include "frame_patch.h"
+#include "ota_client.h"
 #include "protocol.h"
 #include "touch.h"
 #include "ws_client.h"
@@ -71,6 +74,10 @@ static void dispatch_small_message(const uint8_t *buf, int len)
             ESP_LOGW(TAG, "restart requested by server");
             xTaskCreate(restart_task, "remote_restart", 2048, NULL, 8, NULL);
         }
+    } else if (message_type == YELLO_MSG_OTA_OFFER) {
+        /* OTA offers are variable-length (3-byte header + JSON body),
+         * so — unlike config/command above — route by type only. */
+        ota_client_handle_offer(buf + 3, (size_t)(len - 3));
     } else {
         ESP_LOGW(TAG, "unsupported message type=%u len=%d", message_type, len);
     }
@@ -362,8 +369,49 @@ bool ws_client_send_hello(void)
         ESP_LOGI(TAG, "hello sent: fw %s proto %u caps 0x%x",
                  YELLO_FW_VERSION_STRING, (unsigned)YELLO_PROTO_VERSION,
                  (unsigned)YELLO_CAPS_CURRENT);
+        /* Rollback validation: a freshly OTA'd image boots in state
+         * ESP_OTA_IMG_PENDING_VERIFY. It is only marked valid once it
+         * has connected to the server and said hello (i.e. here) — if
+         * the new image can't get this far, the bootloader rolls back
+         * to the previous image on the next reset. */
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (running != NULL) {
+            esp_ota_img_states_t ota_state;
+            if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+                ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+                if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+                    ESP_LOGI(TAG, "OTA image marked valid (rollback cancelled)");
+                } else {
+                    ESP_LOGW(TAG, "failed to mark OTA image valid");
+                }
+            }
+        }
     }
     return sent == sizeof(hello);
+}
+
+bool ws_client_send_ota_status(const char *json)
+{
+    if (s_client == NULL || json == NULL ||
+        !esp_websocket_client_is_connected(s_client)) {
+        return false;
+    }
+    /* OtaStatus wire format: 3-byte header [magic, version,
+     * YELLO_MSG_OTA_STATUS] followed by the UTF-8 JSON body (no
+     * length prefix, no trailing NUL). */
+    size_t json_len = strlen(json);
+    size_t total_len = 3 + json_len;
+    char *frame = malloc(total_len);
+    if (frame == NULL) {
+        return false;
+    }
+    frame[0] = (char)YELLO_PROTO_MAGIC;
+    frame[1] = (char)YELLO_PROTO_VERSION;
+    frame[2] = (char)YELLO_MSG_OTA_STATUS;
+    memcpy(frame + 3, json, json_len);
+    int sent = esp_websocket_client_send_bin(s_client, frame, total_len, pdMS_TO_TICKS(100));
+    free(frame);
+    return sent == (int)total_len;
 }
 
 bool ws_client_send_resync(uint8_t reason, uint32_t last_good_seq)
