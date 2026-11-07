@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
@@ -762,6 +762,68 @@ pub fn all_design_elements(design_layout: &Value) -> Vec<Value> {
     out
 }
 
+/// HA fetch specs the poll loop maintains: per-entity refresh specs
+/// plus the domains referenced by script `ha_count("...")` literals.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct HaFetchSpecs {
+    pub entities: HashMap<String, u64>,
+    pub count_domains: HashSet<String>,
+}
+
+fn ha_spec_add(specs: &mut HaFetchSpecs, entity_id: &str, refresh_secs: u64) {
+    // The most frequent refresh wins when several elements share an entity.
+    let slot = specs.entities.entry(entity_id.to_string()).or_insert(refresh_secs);
+    *slot = (*slot).min(refresh_secs);
+}
+
+static SCRIPT_HA_ENTITY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\bha\s*\(\s*["']([^"']+)["']"#).unwrap());
+static SCRIPT_HA_COUNT_DOMAIN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\bha_count\s*\(\s*["']([^"']+)["']"#).unwrap());
+static HA_DOMAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9_]+$").unwrap());
+
+/// Collect every HA entity the given design layouts can reference:
+/// ha-state / ha-toggle / HA-gauge element `entityId`s, literal
+/// `ha("...")` / `ha('...')` calls in script code (fetched at the
+/// script's refresh interval), and literal `ha_count("domain")`
+/// domains. Script-only entities MUST be collected: `ha()` reads only
+/// the fetched map, so an entity no element declares would otherwise
+/// read "unavailable" forever. Dynamic `ha(variable)` cannot be
+/// collected — the entity is unknowable without running the script.
+pub fn collect_ha_fetch_specs(layouts: &[&Value]) -> HaFetchSpecs {
+    let mut specs = HaFetchSpecs::default();
+    for layout in layouts {
+        for elem in all_design_elements(layout) {
+            let etype = elem.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let props = elem.get("props").unwrap_or(&Value::Null);
+            let refresh = props.get("refreshInterval").and_then(|v| v.as_u64()).unwrap_or(5);
+            let gauge_ha = etype == "gauge"
+                && props.get("sourceKind").and_then(|v| v.as_str()) == Some("ha");
+            if etype == "ha-state" || etype == "ha-toggle" || gauge_ha {
+                let eid = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
+                if !eid.is_empty() {
+                    ha_spec_add(&mut specs, eid, refresh);
+                }
+            } else if etype == "script" {
+                let code = props.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                for cap in SCRIPT_HA_ENTITY.captures_iter(code) {
+                    let eid = &cap[1];
+                    if HaClient::is_valid_entity_id(eid) {
+                        ha_spec_add(&mut specs, eid, refresh);
+                    }
+                }
+                for cap in SCRIPT_HA_COUNT_DOMAIN.captures_iter(code) {
+                    let domain = &cap[1];
+                    if HA_DOMAIN.is_match(domain) {
+                        specs.count_domains.insert(domain.to_string());
+                    }
+                }
+            }
+        }
+    }
+    specs
+}
+
 /// Image sources wanted by any page or shared element of a design.
 pub fn design_image_sources(design_layout: &Value) -> HashSet<String> {
     all_design_elements(design_layout)
@@ -1398,6 +1460,7 @@ pub fn start_background_tasks(state: Arc<AppState>) {
     // Home assistant loop
     let st_ha = state.clone();
     tokio::spawn(async move {
+        let mut last_count_sweep: Option<Instant> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let client = st_ha.ha_client.read().await.clone();
@@ -1405,28 +1468,13 @@ pub fn start_background_tasks(state: Arc<AppState>) {
                 continue;
             }
 
-            let entity_specs = {
+            let fetch_specs = {
                 let studio = st_ha.studio.read().await;
-                let mut specs = HashMap::new();
-                for (_, design) in &studio.designs {
-                    for elem in all_design_elements(&design.layout) {
-                        let etype = elem.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let props = elem.get("props").unwrap_or(&Value::Null);
-                        let gauge_ha = etype == "gauge"
-                            && props.get("sourceKind").and_then(|v| v.as_str()) == Some("ha");
-                        if etype == "ha-state" || etype == "ha-toggle" || gauge_ha {
-                            let eid = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
-                            let refresh = props.get("refreshInterval").and_then(|v| v.as_u64()).unwrap_or(5);
-                            if !eid.is_empty() {
-                                specs.insert(eid.to_string(), refresh);
-                            }
-                        }
-                    }
-                }
-                specs
+                let layouts: Vec<&Value> = studio.designs.values().map(|d| &d.layout).collect();
+                collect_ha_fetch_specs(&layouts)
             };
 
-            for (eid, interval) in entity_specs {
+            for (eid, interval) in fetch_specs.entities {
                 let should_fetch = {
                     let last = st_ha.ha_last_fetch.read().await;
                     match last.get(&eid) {
@@ -1445,6 +1493,40 @@ pub fn start_background_tasks(state: Arc<AppState>) {
                         }
                     });
                 }
+            }
+
+            // ha_count("domain") membership can only be answered from
+            // a full state list. Sweep slowly (at most every 30 s) and
+            // only while some script actually counts a domain; the
+            // per-entity fast polling above is untouched.
+            if !fetch_specs.count_domains.is_empty()
+                && last_count_sweep
+                    .map(|t| t.elapsed() >= Duration::from_secs(30))
+                    .unwrap_or(true)
+            {
+                last_count_sweep = Some(Instant::now());
+                let ha = client.clone();
+                let ha_map = st_ha.ha_values.clone();
+                let domains = fetch_specs.count_domains.clone();
+                tokio::spawn(async move {
+                    if let Ok(states) = ha.list_states().await {
+                        let mut map = ha_map.write().await;
+                        for s in states {
+                            let domain = s.entity_id.split('.').next().unwrap_or("");
+                            if domains.contains(domain) {
+                                map.insert(
+                                    s.entity_id.clone(),
+                                    json!({
+                                        "entity_id": s.entity_id,
+                                        "state": s.state,
+                                        "attributes": s.attributes,
+                                        "last_changed": s.last_changed,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                });
             }
         }
     });

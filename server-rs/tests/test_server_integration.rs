@@ -550,3 +550,196 @@ async fn test_live_touch_endpoint() {
     let resp = handle_http_request(req, state.clone()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+// ---------------------------------------------------------------------------
+// Script ha() fetch coverage: entities referenced only from script
+// code must enter the HA fetch specs, and ha_count domains must be
+// maintained by the slow full-states sweep.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ha_fetch_specs_include_script_literals() {
+    let layout = json!({
+        "version": 3,
+        "pages": [{
+            "id": "main",
+            "elements": [
+                { "id": "t1", "type": "ha-toggle",
+                  "props": { "entityId": "light.kitchen", "refreshInterval": 10 } },
+                { "id": "g1", "type": "gauge",
+                  "props": { "sourceKind": "ha", "entityId": "sensor.power", "refreshInterval": 7 } },
+                { "id": "g2", "type": "gauge",
+                  "props": { "sourceKind": "external", "entityId": "sensor.ignored" } },
+                { "id": "s1", "type": "script",
+                  "props": { "refreshInterval": 9, "code": "text(ha(\"binary_sensor.front_door\"))" } },
+                { "id": "s2", "type": "script",
+                  "props": { "code": "a = ha('sensor.attic_temp')\nb = ha(some_var)\nc = ha(\"not an entity\")\nn = ha_count(\"light\")\nm = ha_count('switch', \"on\")\ntext(str(ha(\"light.kitchen\")))" } }
+            ]
+        }],
+        "sharedElements": []
+    });
+    let specs = yello_server::server::collect_ha_fetch_specs(&[&layout]);
+    // Element-declared entities keep their own intervals.
+    assert_eq!(specs.entities.get("sensor.power"), Some(&7));
+    // Script-only entities are fetched at the script's interval
+    // (explicit 9 on s1, the default 5 on s2).
+    assert_eq!(specs.entities.get("binary_sensor.front_door"), Some(&9));
+    assert_eq!(specs.entities.get("sensor.attic_temp"), Some(&5));
+    // Shared entity: the most frequent refresh wins (s2's default 5
+    // beats the toggle's 10).
+    assert_eq!(specs.entities.get("light.kitchen"), Some(&5));
+    // Non-HA gauges, dynamic ha(variable), and malformed literals
+    // contribute nothing.
+    assert!(!specs.entities.contains_key("sensor.ignored"));
+    assert_eq!(specs.entities.len(), 4);
+    // ha_count domains from both quote styles.
+    assert!(specs.count_domains.contains("light"));
+    assert!(specs.count_domains.contains("switch"));
+    assert_eq!(specs.count_domains.len(), 2);
+}
+
+#[tokio::test]
+async fn script_ha_entities_are_fetched_and_counted() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Mock HA: a per-entity endpoint plus the full state list.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ha_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match socket.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                let body = if path == "/api/states" {
+                    json!([
+                        {"entity_id": "binary_sensor.front_door", "state": "on", "attributes": {}},
+                        {"entity_id": "light.kitchen", "state": "on", "attributes": {}},
+                        {"entity_id": "light.desk", "state": "off", "attributes": {}},
+                        {"entity_id": "switch.fan", "state": "on", "attributes": {}}
+                    ])
+                    .to_string()
+                } else if let Some(eid) = path.strip_prefix("/api/states/") {
+                    let st = if eid == "light.desk" { "off" } else { "on" };
+                    json!({"entity_id": eid, "state": st, "attributes": {}}).to_string()
+                } else {
+                    "[]".to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let studio_path = PathBuf::from("/tmp/test_studio_script_ha.json");
+    let secrets_path = PathBuf::from("/tmp/test_secrets_script_ha.json");
+    let _ = std::fs::remove_file(&studio_path);
+    let _ = std::fs::remove_file(&secrets_path);
+    let state = Arc::new(AppState::new(studio_path, secrets_path, static_dir()));
+    {
+        let mut client = state.ha_client.write().await;
+        *client = yello_server::HaClient::new(&format!("http://{ha_addr}"), "test-token");
+    }
+    // The design's ONLY HA references live in script code: one ha()
+    // literal and one ha_count() domain. No element declares them.
+    let layout = json!({
+        "version": 3,
+        "name": "Script HA",
+        "pages": [{
+            "id": "main",
+            "elements": [
+                { "id": "s1", "type": "script",
+                  "props": { "refreshInterval": 1, "code": "text(ha(\"binary_sensor.front_door\"))" } },
+                { "id": "s2", "type": "script",
+                  "props": { "refreshInterval": 1, "code": "text(str(ha_count(\"light\")))" } }
+            ]
+        }],
+        "sharedElements": []
+    });
+    {
+        let mut studio = state.studio.write().await;
+        studio.designs.insert(
+            "script-ha".to_string(),
+            yello_server::server::Design {
+                id: "script-ha".to_string(),
+                name: "Script HA".to_string(),
+                revision: 1,
+                layout,
+            },
+        );
+    }
+    yello_server::server::start_background_tasks(state.clone());
+
+    // Wait for the poll loop to fetch the script-only entity and for
+    // the ha_count sweep to land the light domain's membership.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        {
+            let vals = state.ha_values.read().await;
+            if vals.contains_key("binary_sensor.front_door") && vals.contains_key("light.desk") {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "HA loop never fetched script-referenced entities"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let ha_vals = state.ha_values.read().await.clone();
+    // Domain filtering: switch.fan exists in HA but no script counts
+    // the switch domain and nothing names the entity.
+    assert!(!ha_vals.contains_key("switch.fan"));
+
+    let ctx = yello_server::server::build_render_context(
+        &std::collections::HashMap::new(),
+        "script-ha",
+        &ha_vals,
+        &std::collections::HashSet::new(),
+        &[],
+    );
+    // ha() returns the mocked state, not "unavailable".
+    let out = yello_server::script_runtime::execute_script(
+        "text(ha(\"binary_sensor.front_door\"))",
+        200,
+        60,
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out.text.as_deref(), Some("on"));
+    // ha_count sees the whole light domain, not just placed elements.
+    let out = yello_server::script_runtime::execute_script(
+        "text(str(ha_count(\"light\")))",
+        200,
+        60,
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out.text.as_deref(), Some("2"));
+    let out = yello_server::script_runtime::execute_script(
+        "text(str(ha_count(\"light\", \"on\")))",
+        200,
+        60,
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out.text.as_deref(), Some("1"));
+}
