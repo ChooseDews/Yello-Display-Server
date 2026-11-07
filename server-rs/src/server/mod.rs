@@ -2,6 +2,13 @@
 
 pub mod jq;
 pub mod mcp;
+pub mod ota;
+
+pub use ota::{
+    load_bundled_firmware, ota_eligibility, parse_app_desc_version, semver_is_behind, BundledFirmware,
+    OtaAttemptRecord, OtaDecision, OtaSessionState,
+};
+use ota::{build_firmware_response, classify_device_peek, PeekDecision};
 
 use crate::frame_diff::dirty_regions;
 use crate::home_assistant::HaClient;
@@ -251,6 +258,17 @@ pub struct DeviceSession {
     /// Last time the background render tick pushed for this device (gates the
     /// 30 s slow tick for designs without clock/script elements).
     pub last_tick: Instant,
+    /// Live OTA state for this session.
+    pub ota: OtaSessionState,
+    /// True once the per-session auto-update check has run (exactly
+    /// one auto-offer attempt per session).
+    pub ota_auto_attempted: bool,
+}
+
+impl DeviceSession {
+    pub fn supports_ota(&self) -> bool {
+        self.capabilities & CAP_OTA != 0
+    }
 }
 
 /// Mirror of Python's renderer.has_clock: layouts containing a visible clock
@@ -289,6 +307,8 @@ pub struct Studio {
     pub schema_version: i32,
     pub designs: HashMap<String, Design>,
     pub screens: HashMap<String, Screen>,
+    #[serde(default)]
+    pub ota_attempts: HashMap<String, OtaAttemptRecord>,
 }
 
 impl Studio {
@@ -310,6 +330,7 @@ impl Studio {
             schema_version: DESIGN_SCHEMA_VERSION,
             designs,
             screens: HashMap::new(),
+            ota_attempts: HashMap::new(),
         }
     }
 }
@@ -330,11 +351,17 @@ pub struct AppState {
     pub studio_path: PathBuf,
     pub secrets_path: PathBuf,
     pub static_dir: PathBuf,
+    pub bundled_firmware: Option<BundledFirmware>,
 }
 
 impl AppState {
     pub fn new(studio_path: PathBuf, secrets_path: PathBuf, static_dir: PathBuf) -> Self {
+        let bundled_firmware = load_bundled_firmware(&static_dir);
+        if let Some(bf) = &bundled_firmware {
+            eprintln!("bundled firmware: v{} ({} bytes, sha256 {})", bf.version, bf.size, bf.sha256);
+        }
         Self {
+            bundled_firmware,
             studio: Arc::new(RwLock::new(Studio::new(None))),
             devices: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
@@ -435,11 +462,23 @@ impl AppState {
                             }
                         }
 
+                        let mut ota_attempts: HashMap<String, OtaAttemptRecord> = HashMap::new();
+                        if let Some(map) = val.get("otaAttempts").and_then(|v| v.as_object()) {
+                            for (d_id, rec) in map {
+                                if DEVICE_ID_RE.is_match(d_id) {
+                                    if let Ok(r) = serde_json::from_value::<OtaAttemptRecord>(rec.clone()) {
+                                        ota_attempts.insert(d_id.clone(), r);
+                                    }
+                                }
+                            }
+                        }
+
                         if !designs.is_empty() {
                             {
                                 let mut st = self.studio.write().await;
                                 st.designs = designs;
                                 st.screens = screens;
+                                st.ota_attempts = ota_attempts;
                             }
                             return;
                         }
@@ -466,6 +505,182 @@ impl AppState {
                 eprintln!("failed to save studio file {}: {e}", self.studio_path.display());
             }
         }
+    }
+}
+
+/// Persist an OTA attempt record and save the studio file.
+pub async fn persist_ota_record(state: &Arc<AppState>, device_id: &str, record: OtaAttemptRecord) {
+    {
+        let mut studio = state.studio.write().await;
+        studio.ota_attempts.insert(device_id.to_string(), record);
+    }
+    state.save_studio_file().await;
+}
+
+/// Try to send an OtaOffer to a connected device. Pure eligibility is
+/// decided by `ota::ota_eligibility`; this is the wiring.
+pub async fn attempt_ota_offer(state: &Arc<AppState>, device_id: &str, manual: bool) -> OtaDecision {
+    let bundled = state.bundled_firmware.clone();
+    let (decision, sender) = {
+        let devices = state.devices.read().await;
+        let studio = state.studio.read().await;
+        let session = devices.get(device_id);
+        let record = studio.ota_attempts.get(device_id);
+        let decision = ota_eligibility(
+            session.is_some(),
+            session.map(|s| s.capabilities).unwrap_or(0),
+            session.and_then(|s| s.firmware_version.as_deref()),
+            bundled.as_ref().map(|b| b.version.as_str()),
+            record,
+            session.map(|s| s.ota.in_flight()).unwrap_or(false),
+            manual,
+        );
+        (decision, session.and_then(|s| s.ws_sender.clone()))
+    };
+    if decision != OtaDecision::Offer {
+        return decision;
+    }
+    let Some(bf) = bundled else { return OtaDecision::NoBundled };
+    let Some(sender) = sender else { return OtaDecision::NotConnected };
+    let from_version = {
+        let devices = state.devices.read().await;
+        devices.get(device_id).and_then(|s| s.firmware_version.clone())
+    };
+    let offer = OtaOffer { version: bf.version.clone(), size: bf.size, sha256: bf.sha256.clone() };
+    if sender.send(WsMessage::Binary(offer.pack())).is_err() {
+        return OtaDecision::NotConnected;
+    }
+    {
+        let mut devices = state.devices.write().await;
+        if let Some(session) = devices.get_mut(device_id) {
+            session.ota = OtaSessionState {
+                state: "offered".to_string(),
+                target_version: Some(bf.version.clone()),
+                progress: None,
+                error: None,
+            };
+        }
+    }
+    persist_ota_record(state, device_id, OtaAttemptRecord {
+        target_version: bf.version.clone(),
+        outcome: "in-progress".to_string(),
+        updated_at: Utc::now().to_rfc3339(),
+        from_version,
+        rebooting: false,
+    }).await;
+    eprintln!("device {device_id}: OTA offer sent for v{}", bf.version);
+    OtaDecision::Offer
+}
+
+/// Spawn the one-per-session delayed auto-update check. Called after
+/// a DeviceHello; the initial frame push has already completed by
+/// then (it happens before the message loop), and the delay lets any
+/// hello-triggered re-push settle too.
+pub fn schedule_auto_ota_check(state: &Arc<AppState>, device_id: &str) {
+    let st = state.clone();
+    let dev = device_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Claim the one-shot check atomically.
+        let should_check = {
+            let mut devices = st.devices.write().await;
+            match devices.get_mut(&dev) {
+                Some(s) if !s.ota_auto_attempted && s.hello_received && s.frames_sent >= 1 => {
+                    s.ota_auto_attempted = true;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if should_check {
+            let _ = attempt_ota_offer(&st, &dev, false).await;
+        }
+    });
+}
+
+/// On a new DeviceHello, resolve a pending OTA record against the
+/// firmware the device now reports.
+pub async fn resolve_ota_on_hello(state: &Arc<AppState>, device_id: &str, fw: &str) {
+    let record = {
+        let studio = state.studio.read().await;
+        studio.ota_attempts.get(device_id).cloned()
+    };
+    let Some(rec) = record else { return };
+    if !rec.is_pending() {
+        return;
+    }
+    if fw == rec.target_version {
+        let target = rec.target_version.clone();
+        persist_ota_record(state, device_id, OtaAttemptRecord {
+            outcome: "succeeded".to_string(),
+            updated_at: Utc::now().to_rfc3339(),
+            rebooting: false,
+            ..rec
+        }).await;
+        // Clear live in-flight state on the (new) session.
+        let mut devices = state.devices.write().await;
+        if let Some(s) = devices.get_mut(device_id) {
+            if s.ota.target_version.as_deref() == Some(target.as_str()) || s.ota.in_flight() {
+                s.ota = OtaSessionState::default();
+            }
+        }
+    } else if rec.rebooting {
+        if let Some(old) = &rec.from_version {
+            if fw == old {
+                persist_ota_record(state, device_id, OtaAttemptRecord {
+                    outcome: "rolled-back".to_string(),
+                    updated_at: Utc::now().to_rfc3339(),
+                    ..rec
+                }).await;
+            }
+        }
+    }
+}
+
+/// Apply an OtaStatus from a device to session + persisted state.
+pub async fn handle_ota_status(state: &Arc<AppState>, device_id: &str, status: &OtaStatus) {
+    let target = {
+        let mut devices = state.devices.write().await;
+        match devices.get_mut(device_id) {
+            Some(session) => {
+                let target = session.ota.target_version.clone()
+                    .or_else(|| state.bundled_firmware.as_ref().map(|b| b.version.clone()));
+                session.ota.state = status.state.clone();
+                if let Some(t) = &target { session.ota.target_version = Some(t.clone()); }
+                session.ota.progress = status.progress;
+                session.ota.error = status.error.clone();
+                target
+            }
+            None => None,
+        }
+    };
+    let Some(target) = target else { return };
+    let existing = {
+        let studio = state.studio.read().await;
+        studio.ota_attempts.get(device_id).cloned()
+    };
+    let from_version = existing.as_ref().and_then(|r| r.from_version.clone());
+    match status.state.as_str() {
+        "failed" => {
+            persist_ota_record(state, device_id, OtaAttemptRecord {
+                target_version: target, outcome: "failed".to_string(),
+                updated_at: Utc::now().to_rfc3339(), from_version, rebooting: false,
+            }).await;
+        }
+        "rebooting" => {
+            persist_ota_record(state, device_id, OtaAttemptRecord {
+                target_version: target, outcome: "in-progress".to_string(),
+                updated_at: Utc::now().to_rfc3339(), from_version, rebooting: true,
+            }).await;
+        }
+        "accepted" | "downloading" | "verifying" => {
+            persist_ota_record(state, device_id, OtaAttemptRecord {
+                target_version: target, outcome: "in-progress".to_string(),
+                updated_at: Utc::now().to_rfc3339(), from_version,
+                rebooting: existing.map(|r| r.rebooting).unwrap_or(false),
+            }).await;
+        }
+        _ => {}
     }
 }
 
@@ -1237,10 +1452,56 @@ pub fn start_background_tasks(state: Arc<AppState>) {
 
 // WebSocket device connection handler
 pub async fn handle_device_ws(
-    stream: tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     addr: SocketAddr,
     state: Arc<AppState>,
 ) {
+    // OTA download: a plain `GET /firmware.bin` on the device port is
+    // served before the WebSocket handshake. Peek until we can decide
+    // (headers complete, upgrade seen, or ~2 KiB).
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut peek_buf = vec![0u8; 2048];
+        let mut decision = PeekDecision::NeedMore;
+        for _ in 0..20 {
+            match stream.peek(&mut peek_buf).await {
+                Ok(n) if n > 0 => {
+                    decision = classify_device_peek(&peek_buf[..n]);
+                    if decision != PeekDecision::NeedMore {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                _ => break,
+            }
+        }
+        if decision == PeekDecision::Firmware {
+            // Consume request headers (cap 8 KiB).
+            let mut consumed: Vec<u8> = Vec::new();
+            let mut byte = [0u8; 1];
+            while consumed.len() < 8192 {
+                match stream.read(&mut byte).await {
+                    Ok(1) => {
+                        consumed.push(byte[0]);
+                        if consumed.ends_with(b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            let bytes = match &state.bundled_firmware {
+                Some(bf) => tokio::fs::read(&bf.path).await.ok(),
+                None => None,
+            };
+            let resp = build_firmware_response(bytes.as_deref());
+            let _ = stream.write_all(&resp).await;
+            let _ = stream.shutdown().await;
+            eprintln!("device port: served /firmware.bin to {addr} ({} bytes)", bytes.map(|b| b.len()).unwrap_or(0));
+            return;
+        }
+    }
+
     let mut device_id = String::new();
     // Versioning hint from the WS URL (`fw` / `proto` / `caps`): lets the
     // session start with the right compression gate before DeviceHello
@@ -1402,6 +1663,8 @@ pub async fn handle_device_ws(
                 hello_received: false,
                 push_lock: Arc::new(Mutex::new(())),
                 last_tick: Instant::now(),
+                ota: OtaSessionState::default(),
+                ota_auto_attempted: false,
             },
         );
     }
@@ -1461,6 +1724,18 @@ pub async fn handle_device_ws(
                                 let _ = push_frame(&st, &dev, true).await;
                             });
                         }
+                        if was_unknown {
+                            // First hello on this session: resolve any
+                            // pending OTA record against this firmware,
+                            // then schedule the one-shot auto-update check.
+                            resolve_ota_on_hello(&state, &device_id, &hello.firmware_version()).await;
+                            schedule_auto_ota_check(&state, &device_id);
+                        }
+                    }
+                } else if data.len() >= 3 && data[0] == PROTO_MAGIC && data[2] == MsgType::OtaStatus as u8 {
+                    if let Ok(status) = OtaStatus::unpack(&data) {
+                        eprintln!("device {device_id} ota status: {} progress={:?} error={:?}", status.state, status.progress, status.error);
+                        handle_ota_status(&state, &device_id, &status).await;
                     }
                 } else if data.len() >= 3 && data[0] == PROTO_MAGIC && data[1] == PROTO_VERSION {
                     match data[2] {
@@ -2120,6 +2395,14 @@ pub async fn handle_http_request(
                     "protoVersion": session.and_then(|s| s.device_proto_version),
                     "capabilities": session.map(|s| s.capabilities),
                     "supportsCompression": session.map(|s| s.supports_compression),
+                    "supportsOta": session.map(|s| s.supports_ota()),
+                    "ota": session.map(|s| s.ota.to_json()),
+                    "otaUpdateAvailable": session.map(|s| match (&s.firmware_version, &state.bundled_firmware) {
+                        (Some(fw), Some(bf)) => semver_is_behind(fw, &bf.version),
+                        _ => false,
+                    }),
+                    "otaAttempt": studio.ota_attempts.get(&screen.id).map(|r| serde_json::to_value(r).unwrap_or_default()),
+                    "bundledFirmwareVersion": state.bundled_firmware.as_ref().map(|b| b.version.clone()),
                 }));
             }
 
@@ -2148,6 +2431,13 @@ pub async fn handle_http_request(
                     "protoVersion": session.device_proto_version,
                     "capabilities": session.capabilities,
                     "supportsCompression": session.supports_compression,
+                    "supportsOta": session.supports_ota(),
+                    "ota": session.ota.to_json(),
+                    "otaUpdateAvailable": match (&session.firmware_version, &state.bundled_firmware) {
+                        (Some(fw), Some(bf)) => semver_is_behind(fw, &bf.version),
+                        _ => false,
+                    },
+                    "bundledFirmwareVersion": state.bundled_firmware.as_ref().map(|b| b.version.clone()),
                     "helloReceived": session.hello_received
                 }));
             }
@@ -2156,7 +2446,9 @@ pub async fn handle_http_request(
                 "designs": designs_arr,
                 "screens": screens_arr,
                 "integrations": {"homeAssistant": {"configured": ha_configured}},
-                "devices": devices_arr
+                "devices": devices_arr,
+                "bundledFirmwareVersion": state.bundled_firmware.as_ref().map(|b| b.version.clone()),
+                "bundledFirmware": state.bundled_firmware.as_ref().map(|b| json!({"version": b.version, "size": b.size, "sha256": b.sha256}))
             }))
         }
         (Method::POST, "/api/designs") => {
@@ -2455,6 +2747,8 @@ pub async fn handle_http_request(
                         "protoVersion": s.device_proto_version,
                         "capabilities": s.capabilities,
                         "supportsCompression": s.supports_compression,
+                        "supportsOta": s.supports_ota(),
+                        "ota": s.ota.to_json(),
                         "helloReceived": s.hello_received,
                     })
                 })
@@ -2462,6 +2756,9 @@ pub async fn handle_http_request(
             connections.sort_by(|a, b| a["screenId"].as_str().cmp(&b["screenId"].as_str()));
             json_response(StatusCode::OK, &json!({
                 "version": env!("CARGO_PKG_VERSION"),
+                "firmwareVersion": state.bundled_firmware.as_ref().map(|b| b.version.clone()),
+                "bundledFirmwareVersion": state.bundled_firmware.as_ref().map(|b| b.version.clone()),
+                "bundledFirmware": state.bundled_firmware.as_ref().map(|b| json!({"version": b.version, "size": b.size, "sha256": b.sha256})),
                 "protoVersion": PROTO_VERSION,
                 "capabilities": CAPS_CURRENT,
                 "uptimeSeconds": state.started.elapsed().as_secs(),
@@ -2489,6 +2786,18 @@ pub async fn handle_http_request(
                     &json!({"error": "no live frame for this screen (not connected, or nothing pushed yet)"}),
                 ),
             }
+        }
+        (Method::POST, p) if p.starts_with("/api/devices/") && p.ends_with("/update") => {
+            let device_id = p.trim_start_matches("/api/devices/").trim_end_matches("/update").trim_matches('/');
+            let decision = attempt_ota_offer(&state, device_id, true).await;
+            let status = if decision == OtaDecision::NotConnected { StatusCode::NOT_FOUND } else { StatusCode::OK };
+            json_response(status, &json!({
+                "status": decision.as_str(),
+                "result": decision.as_str(),
+                "deviceId": device_id,
+                "targetVersion": state.bundled_firmware.as_ref().map(|b| b.version.clone()),
+                "bundledFirmwareVersion": state.bundled_firmware.as_ref().map(|b| b.version.clone()),
+            }))
         }
         (Method::GET, "/api/status") => {
             let devices = state.devices.read().await;

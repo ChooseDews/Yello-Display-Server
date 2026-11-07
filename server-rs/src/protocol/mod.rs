@@ -57,6 +57,8 @@ pub enum MsgType {
     FramePatch = 6,    // server -> device
     ResyncRequest = 7, // device -> server
     DeviceHello = 8,   // device -> server, first message after connect
+    OtaOffer = 9,      // server -> device
+    OtaStatus = 10,    // device -> server
 }
 
 /// Device capability bits (`DeviceHello::capabilities`, also the `caps`
@@ -65,6 +67,7 @@ pub enum MsgType {
 pub const CAP_RAW_BUNDLE: u32 = 1 << 0; // raw (uncompressed) FramePatch bundle — every v2 device
 pub const CAP_DEFLATE: u32 = 1 << 1; // DEFLATE/zlib FramePatch payloads (tinfl, 4 KiB window)
 pub const CAP_FRAME_PATCH: u32 = 1 << 2; // FramePatch message itself (vs the removed v1 ZoneUpdate)
+pub const CAP_OTA: u32 = 1 << 3; // over-the-air firmware updates (OtaOffer/OtaStatus)
 
 /// Capabilities of a fully current v2 firmware build.
 pub const CAPS_CURRENT: u32 = CAP_RAW_BUNDLE | CAP_DEFLATE | CAP_FRAME_PATCH;
@@ -423,6 +426,10 @@ impl DeviceHello {
         self.capabilities & CAP_DEFLATE != 0
     }
 
+    pub fn supports_ota(&self) -> bool {
+        self.capabilities & CAP_OTA != 0
+    }
+
     pub fn pack(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(DEVICE_HELLO_BYTES);
         buf.push(PROTO_MAGIC);
@@ -461,6 +468,83 @@ impl DeviceHello {
             max_window_bits: data[11],
             display_width: u16::from_le_bytes([data[12], data[13]]),
             display_height: u16::from_le_bytes([data[14], data[15]]),
+        })
+    }
+}
+
+/// OTA offer: server -> device. Wire format is the shared 3-byte
+/// header [PROTO_MAGIC, PROTO_VERSION, type] + UTF-8 JSON body, no
+/// length prefix / NUL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtaOffer {
+    pub version: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl OtaOffer {
+    pub fn pack(&self) -> Vec<u8> {
+        let body = serde_json::json!({
+            "version": self.version,
+            "size": self.size,
+            "sha256": self.sha256,
+        })
+        .to_string();
+        let mut buf = Vec::with_capacity(3 + body.len());
+        buf.push(PROTO_MAGIC);
+        buf.push(PROTO_VERSION);
+        buf.push(MsgType::OtaOffer as u8);
+        buf.extend_from_slice(body.as_bytes());
+        buf
+    }
+    pub fn unpack(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 3 || data[0] != PROTO_MAGIC || data[1] != PROTO_VERSION || data[2] != MsgType::OtaOffer as u8 {
+            return Err("invalid ota offer header".into());
+        }
+        let v: serde_json::Value = serde_json::from_slice(&data[3..]).map_err(|e| e.to_string())?;
+        Ok(Self {
+            version: v.get("version").and_then(|x| x.as_str()).ok_or("missing version")?.to_string(),
+            size: v.get("size").and_then(|x| x.as_u64()).ok_or("missing size")?,
+            sha256: v.get("sha256").and_then(|x| x.as_str()).ok_or("missing sha256")?.to_string(),
+        })
+    }
+}
+
+/// OTA status: device -> server, same 3-byte header + JSON body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtaStatus {
+    pub state: String,
+    pub progress: Option<i64>,
+    pub error: Option<String>,
+}
+
+impl OtaStatus {
+    pub fn pack(&self) -> Vec<u8> {
+        let mut body = serde_json::Map::new();
+        body.insert("state".into(), serde_json::json!(self.state));
+        if let Some(p) = self.progress {
+            body.insert("progress".into(), serde_json::json!(p));
+        }
+        if let Some(e) = &self.error {
+            body.insert("error".into(), serde_json::json!(e));
+        }
+        let body = serde_json::Value::Object(body).to_string();
+        let mut buf = Vec::with_capacity(3 + body.len());
+        buf.push(PROTO_MAGIC);
+        buf.push(PROTO_VERSION);
+        buf.push(MsgType::OtaStatus as u8);
+        buf.extend_from_slice(body.as_bytes());
+        buf
+    }
+    pub fn unpack(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 3 || data[0] != PROTO_MAGIC || data[1] != PROTO_VERSION || data[2] != MsgType::OtaStatus as u8 {
+            return Err("invalid ota status header".into());
+        }
+        let v: serde_json::Value = serde_json::from_slice(&data[3..]).map_err(|e| e.to_string())?;
+        Ok(Self {
+            state: v.get("state").and_then(|x| x.as_str()).ok_or("missing state")?.to_string(),
+            progress: v.get("progress").and_then(|x| x.as_i64()),
+            error: v.get("error").and_then(|x| x.as_str()).map(|s| s.to_string()),
         })
     }
 }
@@ -798,6 +882,46 @@ mod tests {
         assert_eq!(event.x, 100);
         assert_eq!(event.y, 200);
         assert_eq!(event.timestamp_ms, 12345);
+    }
+
+    #[test]
+    fn test_ota_offer_golden_header_and_roundtrip() {
+        let offer = OtaOffer { version: "2.2.0".into(), size: 942080, sha256: "ab12".into() };
+        let packed = offer.pack();
+        assert_eq!(&packed[..3], &[PROTO_MAGIC, PROTO_VERSION, MsgType::OtaOffer as u8]);
+        assert_eq!(&packed[..3], &[0x59, 2, 9]);
+        let body: serde_json::Value = serde_json::from_slice(&packed[3..]).unwrap();
+        assert_eq!(body["version"], "2.2.0");
+        assert_eq!(body["size"], 942080);
+        assert_eq!(body["sha256"], "ab12");
+        assert_eq!(OtaOffer::unpack(&packed).unwrap(), offer);
+    }
+
+    #[test]
+    fn test_ota_status_golden_header_and_roundtrip() {
+        let st = OtaStatus { state: "downloading".into(), progress: Some(40), error: None };
+        let packed = st.pack();
+        assert_eq!(&packed[..3], &[PROTO_MAGIC, PROTO_VERSION, MsgType::OtaStatus as u8]);
+        assert_eq!(&packed[..3], &[0x59, 2, 10]);
+        assert_eq!(OtaStatus::unpack(&packed).unwrap(), st);
+        let failed = OtaStatus { state: "failed".into(), progress: None, error: Some("bad sha".into()) };
+        assert_eq!(OtaStatus::unpack(&failed.pack()).unwrap(), failed);
+        // Bad type byte is rejected.
+        let mut bad = packed.clone();
+        bad[2] = MsgType::OtaOffer as u8;
+        assert!(OtaStatus::unpack(&bad).is_err());
+    }
+
+    #[test]
+    fn test_supports_ota() {
+        let mut hello = DeviceHello {
+            proto_version: 2, capabilities: CAPS_CURRENT, fw_major: 2, fw_minor: 2, fw_patch: 0,
+            max_window_bits: PATCH_WINDOW_BITS, display_width: 240, display_height: 320,
+        };
+        assert!(!hello.supports_ota());
+        hello.capabilities |= CAP_OTA;
+        assert!(hello.supports_ota());
+        assert_eq!(CAP_OTA, 8);
     }
 
     #[test]

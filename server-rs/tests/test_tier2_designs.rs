@@ -182,6 +182,8 @@ fn make_session(device_id: &str) -> DeviceSession {
         hello_received: false,
         push_lock: Arc::new(Mutex::new(())),
         last_tick: std::time::Instant::now(),
+                    ota: yello_server::OtaSessionState::default(),
+                    ota_auto_attempted: false,
     }
 }
 

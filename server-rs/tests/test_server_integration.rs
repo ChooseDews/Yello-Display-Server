@@ -213,6 +213,8 @@ async fn test_websocket_stream_and_patch() {
                     hello_received: true,
                     push_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                     last_tick: std::time::Instant::now(),
+                    ota: yello_server::OtaSessionState::default(),
+                    ota_auto_attempted: false,
                 },
             );
         }
@@ -316,6 +318,8 @@ async fn test_push_frame_raw_for_device_without_deflate_capability() {
                 hello_received: true,
                 push_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 last_tick: std::time::Instant::now(),
+                    ota: yello_server::OtaSessionState::default(),
+                    ota_auto_attempted: false,
             },
         );
     }

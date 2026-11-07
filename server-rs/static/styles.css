@@ -386,6 +386,8 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 .flash-custom .flash-section { margin-top: 12px; }
 .flash-custom input[type="file"] { color: var(--muted); font-size: 13px; }
 esp-web-install-button { display: inline-block; }
+.ota-section { margin: 0 0 14px; }
+.ota-section .form-help { margin: 0; }
 
 @media (max-width: 1050px) {
   .workspace { grid-template-columns: 210px minmax(380px, 1fr) 280px; }

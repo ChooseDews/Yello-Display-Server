@@ -191,6 +191,9 @@ async function initFlasher() {
     const intro = document.createElement("p");
     intro.className = "form-help";
     intro.textContent = "Bundled: the latest firmware-latest build \u2014 bootloader, partition table and app, no download needed.";
+    const otaNote = document.createElement("p");
+    otaNote.className = "form-help";
+    otaNote.textContent = "Updating from an older version? Flash the bundled firmware in full (not an app-only .bin) \u2014 it installs the new partition layout that enables over-the-air updates.";
     const bundledNote = document.createElement("p");
     bundledNote.className = "form-help";
     const bundledGo = document.createElement("button");
@@ -200,7 +203,7 @@ async function initFlasher() {
     bundledGo.addEventListener("click", () => {
       flashLaunchInstall(bundledBox, badge, bundledNote, bundledGo, "/static/firmware/manifest.json");
     });
-    bundledBox.append(intro, bundledGo, bundledNote);
+    bundledBox.append(intro, otaNote, bundledGo, bundledNote);
   }
 
   // Fallback path: the user's own .bin, behind a disclosure.
@@ -720,6 +723,69 @@ export function selectScreen(screenId) {
   if (screen) loadDesign(screen.designId).catch((error) => toast(error.message, true));
 }
 
+function fwIsBehind(deviceFw, bundledFw) {
+  if (!deviceFw || !bundledFw || deviceFw === bundledFw) return false;
+  const parse = (s) => {
+    const parts = String(s).split(".").map((p) => parseInt(p, 10));
+    return parts.some((n) => Number.isNaN(n)) ? null : [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+  };
+  const d = parse(deviceFw); const b = parse(bundledFw);
+  if (!d || !b) return false;
+  for (let i = 0; i < 3; i++) { if (d[i] !== b[i]) return d[i] < b[i]; }
+  return false;
+}
+
+function renderOtaSection(screen) {
+  const bundled = S.studio.bundledFirmwareVersion || screen.bundledFirmwareVersion;
+  if (!screen.connected || !bundled) return null;
+  const behind = screen.otaUpdateAvailable ?? fwIsBehind(screen.firmwareVersion, bundled);
+  const ota = screen.ota || {};
+  const wrap = document.createElement("div");
+  wrap.className = "ota-section";
+  if (ota.inFlight || ["offered", "accepted", "downloading", "verifying", "rebooting"].includes(ota.state)) {
+    const text = document.createElement("p");
+    text.className = "form-help";
+    const progress = ota.progress !== null && ota.progress !== undefined && ota.state === "downloading" ? ` ${ota.progress}%` : "";
+    text.textContent = `Updating: ${ota.state}${progress}\u2026`;
+    wrap.append(text);
+    return wrap;
+  }
+  if (ota.state === "failed") {
+    const text = document.createElement("p");
+    text.className = "form-help";
+    text.textContent = `Update failed${ota.error ? `: ${ota.error}` : ""}`;
+    wrap.append(text);
+    if (!behind) return wrap;
+  }
+  if (!behind) return ota.state === "failed" ? wrap : null;
+  if (screen.supportsOta) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "primary-button";
+    btn.textContent = `Update to v${bundled}`;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const response = await fetch(`/api/devices/${encodeURIComponent(screen.id)}/update`, { method: "POST" });
+        const result = await response.json();
+        if (result.result !== "offered" && result.status !== "offered") throw new Error(result.result || result.status || "Update was not offered");
+        toast(`Update to v${bundled} offered to ${screen.name}`);
+        await refreshStudio();
+      } catch (error) {
+        btn.disabled = false;
+        toast(error.message, true);
+      }
+    });
+    wrap.append(btn);
+    return wrap;
+  }
+  const note = document.createElement("p");
+  note.className = "form-help";
+  note.textContent = `Needs the one-time USB update to ${bundled} for over-the-air updates`;
+  wrap.append(note);
+  return wrap;
+}
+
 export function renderDevicePage() {
   initFlasher().catch(() => {});
   initUsbConfig();
@@ -871,7 +937,9 @@ export function renderDevicePage() {
         toast(error.message, true);
       }
     };
-    card.append(head, metrics, form);
+    const otaSection = renderOtaSection(screen);
+    if (otaSection) card.append(head, metrics, otaSection, form);
+    else card.append(head, metrics, form);
     grid.append(card);
   }
 }

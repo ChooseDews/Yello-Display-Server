@@ -25,7 +25,7 @@ pub use protocol::{
     PROTO_MAGIC, PROTO_VERSION, MsgType, TouchType, Orientation as ProtoOrientation,
     DeviceCommandType, TouchEvent, DeviceConfig, DeviceStatus, DeviceCommand,
     FramePatch, FramePatchHeader, ZoneRecord, ResyncRequest, ResyncReason,
-    DeviceHello, CAP_RAW_BUNDLE, CAP_DEFLATE, CAP_FRAME_PATCH, CAPS_CURRENT,
+    DeviceHello, OtaOffer, OtaStatus, CAP_RAW_BUNDLE, CAP_DEFLATE, CAP_FRAME_PATCH, CAP_OTA, CAPS_CURRENT,
     DEVICE_HELLO_BYTES, parse_hello_hint,
     FRAME_PATCH_HEADER_BYTES, ZONE_RECORD_HEADER_BYTES, PATCH_WINDOW_BITS,
     PATCH_FLAG_COMPRESSED, PATCH_FLAG_FULL_FRAME,
@@ -35,7 +35,9 @@ pub use protocol::{
 
 pub use frame_diff::dirty_regions;
 
+pub use server::ota;
 pub use server::{
+    attempt_ota_offer, BundledFirmware, OtaAttemptRecord, OtaDecision, OtaSessionState,
     AppState, DeviceSession, Studio, Design, StreamSample, LivePreviewState,
     MAX_ZONE_AREA_PX, STREAM_STATS_WINDOW_S,
     MAX_EXTERNAL_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, FULL_RESYNC_INTERVAL_S,
