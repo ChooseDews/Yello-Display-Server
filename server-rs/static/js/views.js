@@ -182,18 +182,15 @@ async function initFlasher() {
   const bundledParts = bundledManifest?.builds?.[0]?.parts;
   const hasBundled = Array.isArray(bundledParts) && bundledParts.length > 0;
 
-  const bundledEls = [];
+  // Primary path: the bundled firmware, one stacked block.
+  const bundledBox = document.createElement("div");
+  bundledBox.className = "flash-section";
   if (!hasBundled) badge.textContent = "You provide the .bin";
   if (hasBundled) {
     badge.textContent = "Firmware ready";
     const intro = document.createElement("p");
     intro.className = "form-help";
-    intro.textContent = "This server carries the latest firmware from the firmware-latest GitHub release \u2014 no download needed:";
-    const partsLine = document.createElement("p");
-    partsLine.className = "form-help";
-    partsLine.textContent = bundledParts
-      .map((p) => `${p.path} \u2192 0x${Number(p.offset).toString(16)}`)
-      .join(" \u00b7 ");
+    intro.textContent = "Bundled: the latest firmware-latest build \u2014 bootloader, partition table and app, no download needed.";
     const bundledNote = document.createElement("p");
     bundledNote.className = "form-help";
     const bundledGo = document.createElement("button");
@@ -201,22 +198,28 @@ async function initFlasher() {
     bundledGo.className = "primary-button";
     bundledGo.textContent = "Connect & install firmware";
     bundledGo.addEventListener("click", () => {
-      flashLaunchInstall(region, badge, bundledNote, bundledGo, "/static/firmware/manifest.json");
+      flashLaunchInstall(bundledBox, badge, bundledNote, bundledGo, "/static/firmware/manifest.json");
     });
-    bundledEls.push(intro, partsLine, bundledGo, bundledNote);
-    const divider = document.createElement("p");
-    divider.className = "form-help";
-    divider.textContent = "Or provide your own .bin instead:";
-    bundledEls.push(divider);
+    bundledBox.append(intro, bundledGo, bundledNote);
   }
+
+  // Fallback path: the user's own .bin, behind a disclosure.
+  const customDetails = document.createElement("details");
+  customDetails.className = "flash-custom";
+  const customSummary = document.createElement("summary");
+  customSummary.textContent = "Use your own .bin instead";
+  const customBox = document.createElement("div");
+  customBox.className = "flash-section";
+  customDetails.append(customSummary, customBox);
+  if (!hasBundled) customDetails.open = true;
 
   const intro = document.createElement("p");
   intro.className = "form-help";
   intro.textContent = hasBundled
-    ? "Pick file(s) you downloaded from GitHub:"
-    : "The server doesn't carry firmware. Download the .bin from GitHub, then provide it here:";
+    ? "Download from GitHub, then pick the file(s) here. yello_device.bin alone updates a board already running Yello; for a blank board pick the full set, including flasher_args.json."
+    : "The server doesn't carry firmware. Download the .bin from GitHub, then pick the file(s) here. yello_device.bin alone updates a board already running Yello; for a blank board pick the full set, including flasher_args.json.";
   const download = document.createElement("div");
-  download.className = "settings-actions";
+  download.className = "flash-downloads";
   const dlApp = document.createElement("a");
   dlApp.className = "secondary-button";
   dlApp.href = FIRMWARE_APP_BIN_URL;
@@ -236,7 +239,7 @@ async function initFlasher() {
   picker.setAttribute("aria-label", "Firmware files");
   const summary = document.createElement("p");
   summary.className = "form-help";
-  summary.textContent = "No file chosen yet. yello_device.bin alone updates a board already running Yello; add bootloader.bin, partition-table.bin and flasher_args.json from the same release for a blank board.";
+  summary.textContent = "No file chosen yet.";
 
   const go = document.createElement("button");
   go.type = "button";
@@ -281,10 +284,11 @@ async function initFlasher() {
     };
     const manifestUrl = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/json" }));
     flashBlobUrls.push(manifestUrl);
-    flashLaunchInstall(region, badge, summary, go, manifestUrl);
+    flashLaunchInstall(customBox, badge, summary, go, manifestUrl);
   });
 
-  region.append(...bundledEls, intro, download, picker, summary, go);
+  customBox.append(intro, download, picker, summary, go);
+  region.append(bundledBox, customDetails);
 }
 
 // ---------- USB serial device configuration ----------

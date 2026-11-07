@@ -377,7 +377,14 @@ input[type="color"] { width: 34px; height: 29px; min-height: 0; padding: 2px; }
 .oauth-block { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 4px; }
 .flash-notes { margin: 14px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .flash-notes strong { color: var(--text); }
-#flash-region { min-height: 38px; display: flex; align-items: center; }
+#flash-region { min-height: 38px; display: flex; flex-direction: column; align-items: stretch; gap: 14px; padding-top: 18px; }
+#flash-region .form-help { grid-column: auto; margin: 0; font-size: 13px; }
+.flash-section { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.flash-downloads { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.flash-custom { border-top: 1px solid var(--line); padding-top: 12px; }
+.flash-custom > summary { cursor: pointer; color: var(--text); font-size: 13px; font-weight: 600; }
+.flash-custom .flash-section { margin-top: 12px; }
+.flash-custom input[type="file"] { color: var(--muted); font-size: 13px; }
 esp-web-install-button { display: inline-block; }
 
 @media (max-width: 1050px) {
