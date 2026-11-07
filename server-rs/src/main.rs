@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use yello_server::server::{handle_device_ws, handle_http_request, start_background_tasks, AppState};
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let web_host = std::env::var("YELLO_WEB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let web_port: u16 = std::env::var("YELLO_WEB_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);

@@ -45,7 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && groupadd -r -g 10001 yello && useradd -r -g yello -u 10001 yello \
     && mkdir -p /data && chown yello:yello /data
 
-ENV YELLO_WEB_HOST=0.0.0.0 \
+ENV MALLOC_ARENA_MAX=2 \
+    YELLO_WEB_HOST=0.0.0.0 \
     YELLO_WEB_PORT=8080 \
     YELLO_DEVICE_HOST=0.0.0.0 \
     YELLO_DEVICE_WS_PORT=8765 \
