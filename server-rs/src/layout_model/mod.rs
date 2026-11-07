@@ -222,6 +222,14 @@ pub fn default_element(element_type: &str, element_id: &str) -> Result<Value, St
                 json!({"label": "Open screen", "targetDesignId": "default"}),
             );
         }
+        "touch-zone" => {
+            // Never renders on the device; the frame is a pure touch
+            // target carrying the button's action set. The editor shows
+            // it as a dashed outline so it stays placeable/selectable.
+            defaults.insert("frame".to_string(), json!({"x": 60, "y": 140, "w": 120, "h": 44}));
+            defaults.insert("style".to_string(), json!({}));
+            defaults.insert("props".to_string(), json!({"actionId": ""}));
+        }
         "image" => {
             defaults.insert("frame".to_string(), json!({"x": 80, "y": 120, "w": 80, "h": 80}));
             defaults.insert("style".to_string(), json!({}));
@@ -463,6 +471,55 @@ impl Validator {
     }
 }
 
+/// The Home Assistant service presets a button / touch-zone can fire.
+/// Kept in one place: validation, the fire path, and the Studio Agent
+/// docs all speak in these names.
+pub const HA_ACTION_SERVICES: [&str; 6] = ["toggle", "turn_on", "turn_off", "press", "trigger", "scene"];
+
+/// Validate the shared "fires something when tapped" prop set of
+/// `button` and `touch-zone`: the design-level HTTP `actionId`, or —
+/// when `actionKind` is "ha" — a direct Home Assistant service call.
+/// Optional keys are only written when they carry a non-default value
+/// (same omission rule as the element-level `group` key), so designs
+/// saved before these fields existed normalize byte-identically.
+fn validate_action_props(
+    v: &mut Validator,
+    props_raw: Option<&Map<String, Value>>,
+    path: &str,
+    action_ids: &HashSet<String>,
+) -> Map<String, Value> {
+    let mut props = Map::new();
+    let action_id = v.string(props_raw.and_then(|m| m.get("actionId")), &format!("{path}.props.actionId"), "", 64);
+    if !action_id.is_empty() && !action_ids.contains(&action_id) {
+        v.error(&format!("{path}.props.actionId"), "references an unknown action");
+    }
+    props.insert("actionId".to_string(), json!(action_id));
+
+    let mut action_kind = v.string(props_raw.and_then(|m| m.get("actionKind")), &format!("{path}.props.actionKind"), "", 8);
+    if action_kind != "" && action_kind != "ha" {
+        v.error(&format!("{path}.props.actionKind"), "must be empty (HTTP action) or \"ha\"");
+        action_kind = String::new();
+    }
+    if action_kind == "ha" {
+        props.insert("actionKind".to_string(), json!("ha"));
+        let entity_id = v.string(props_raw.and_then(|m| m.get("haEntityId")), &format!("{path}.props.haEntityId"), "", 255);
+        if !HA_ENTITY_RE.is_match(&entity_id) {
+            v.error(&format!("{path}.props.haEntityId"), "must be a Home Assistant entity ID such as light.kitchen");
+        }
+        props.insert("haEntityId".to_string(), json!(entity_id));
+        let mut service = v.string(props_raw.and_then(|m| m.get("haService")), &format!("{path}.props.haService"), "toggle", 16);
+        if !HA_ACTION_SERVICES.contains(&service.as_str()) {
+            v.error(
+                &format!("{path}.props.haService"),
+                "must be one of toggle, turn_on, turn_off, press, trigger, scene",
+            );
+            service = "toggle".to_string();
+        }
+        props.insert("haService".to_string(), json!(service));
+    }
+    props
+}
+
 pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
     if !raw.is_object() {
         return Err(LayoutValidationError::new("must be an object"));
@@ -579,7 +636,7 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
     let supported_types = [
         "text", "clock", "external-text", "color-block", "button",
         "design-link", "image", "ha-state", "ha-toggle", "script",
-        "screen", "gauge", "qr", "shape",
+        "screen", "gauge", "qr", "shape", "touch-zone",
     ];
 
     let mut element_ids = HashSet::new();
@@ -673,6 +730,39 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                     let def_off = def_style.get("offColor").and_then(|v| v.as_str()).unwrap_or("#353b48");
                     let off_color = v.color(style_raw.and_then(|m| m.get("offColor")), &format!("{path}.style.offColor"), def_off);
                     style.insert("offColor".to_string(), json!(off_color));
+
+                    // Optional border: ONE borderColor for the on state,
+                    // borderColorOff as an optional override for the off
+                    // state (falling back to borderColor), and a shared
+                    // borderWidth in px. The keys are written ONLY when
+                    // the author actually set them, so designs saved
+                    // before they existed keep their exact normalized
+                    // shape; the renderer treats "absent" as the
+                    // historical look (2px white border) and an explicit
+                    // borderWidth of 0 as no border at all.
+                    if let Some(raw_bw) = style_raw.and_then(|m| m.get("borderWidth")) {
+                        let bw = v.integer(Some(raw_bw), &format!("{path}.style.borderWidth"), 2, 0, 20);
+                        style.insert("borderWidth".to_string(), json!(bw));
+                    }
+                    for key in ["borderColor", "borderColorOff"] {
+                        if let Some(raw_bc) = style_raw.and_then(|m| m.get(key)) {
+                            let is_empty = raw_bc.as_str().map(|s| s.is_empty()).unwrap_or(false);
+                            if !is_empty {
+                                let bc = v.color(Some(raw_bc), &format!("{path}.style.{key}"), "#ffffff");
+                                style.insert(key.to_string(), json!(bc));
+                            }
+                        }
+                    }
+                }
+
+                // Invisible interactive elements: the renderer draws
+                // nothing, but the frame still hit-tests (the element
+                // sits over whatever is beneath it). Written only when
+                // true, for the same byte-identity reason as above.
+                if ["ha-toggle", "button", "design-link"].contains(&etype.as_str()) {
+                    if style_raw.and_then(|m| m.get("invisible")).and_then(|x| x.as_bool()) == Some(true) {
+                        style.insert("invisible".to_string(), json!(true));
+                    }
                 }
 
                 if etype == "gauge" {
@@ -720,12 +810,15 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                         json!({"sourceId": source_id, "wrap": wrap})
                     }
                     "button" => {
-                        let action_id = v.string(props_raw.and_then(|m| m.get("actionId")), &format!("{path}.props.actionId"), "", 64);
-                        if !action_id.is_empty() && !action_ids.contains(&action_id) {
-                            v.error(&format!("{path}.props.actionId"), "references an unknown action");
-                        }
                         let label = v.string(props_raw.and_then(|m| m.get("label")), &format!("{path}.props.label"), "Button", 100);
-                        json!({"label": label, "actionId": action_id})
+                        let mut action_props = validate_action_props(&mut v, props_raw, path.as_str(), &action_ids);
+                        let mut obj = Map::new();
+                        obj.insert("label".to_string(), json!(label));
+                        obj.append(&mut action_props);
+                        Value::Object(obj)
+                    }
+                    "touch-zone" => {
+                        Value::Object(validate_action_props(&mut v, props_raw, path.as_str(), &action_ids))
                     }
                     "design-link" => {
                         let mut target = v.string(props_raw.and_then(|m| m.get("targetDesignId")), &format!("{path}.props.targetDesignId"), "default", 64);
@@ -775,9 +868,19 @@ pub fn validate_layout(raw: Value) -> Result<Value, LayoutValidationError> {
                         }
                         let label = v.string(props_raw.and_then(|m| m.get("label")), &format!("{path}.props.label"), "Light", 100);
                         let refresh_interval = v.integer(props_raw.and_then(|m| m.get("refreshInterval")), &format!("{path}.props.refreshInterval"), 2, 1, 3600);
-                        json!({
-                            "entityId": entity_id, "label": label, "refreshInterval": refresh_interval
-                        })
+                        let mut obj = Map::new();
+                        obj.insert("entityId".to_string(), json!(entity_id));
+                        obj.insert("label".to_string(), json!(label));
+                        obj.insert("refreshInterval".to_string(), json!(refresh_interval));
+                        // Per-state display text; written only when
+                        // non-empty (renderer falls back to the label).
+                        for key in ["textOn", "textOff"] {
+                            let text = v.string(props_raw.and_then(|m| m.get(key)), &format!("{path}.props.{key}"), "", 100);
+                            if !text.is_empty() {
+                                obj.insert(key.to_string(), json!(text));
+                            }
+                        }
+                        Value::Object(obj)
                     }
                     "script" => {
                         let code = v.string(props_raw.and_then(|m| m.get("code")), &format!("{path}.props.code"), "text(\"Hello from a script\")", 8000);
@@ -1290,5 +1393,135 @@ mod tests {
             format!("{err:?}").contains("no longer accepted"),
             "unexpected error: {err:?}"
         );
+    }
+
+    fn design_with_elements(elements: Value) -> Value {
+        let mut design = default_design();
+        design["pages"][0]["elements"] = elements;
+        design
+    }
+
+    fn element(etype: &str, style: Value, props: Value) -> Value {
+        json!({
+            "id": "el1", "type": etype, "name": "El", "visible": true, "locked": false,
+            "frame": {"x": 10, "y": 10, "w": 120, "h": 44},
+            "style": style, "props": props
+        })
+    }
+
+    #[test]
+    fn blocks_ha_toggle_new_fields_roundtrip() {
+        let design = design_with_elements(json!([element(
+            "ha-toggle",
+            json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8,
+                   "borderColor": "#FFAA00", "borderColorOff": "#224466", "borderWidth": 3,
+                   "invisible": true}),
+            json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2,
+                   "textOn": "Open", "textOff": "Closed"}),
+        )]));
+        let validated = validate_design(design).unwrap();
+        let el = &validated["pages"][0]["elements"][0];
+        assert_eq!(el["style"]["borderColor"], "#ffaa00");
+        assert_eq!(el["style"]["borderColorOff"], "#224466");
+        assert_eq!(el["style"]["borderWidth"], 3);
+        assert_eq!(el["style"]["invisible"], true);
+        assert_eq!(el["props"]["textOn"], "Open");
+        assert_eq!(el["props"]["textOff"], "Closed");
+    }
+
+    #[test]
+    fn blocks_legacy_elements_gain_no_new_keys() {
+        // Backward compatibility: a pre-blocks design must normalize
+        // exactly as before — no border/invisible/textOn keys appear.
+        let mut button_el = element(
+            "button",
+            json!({"color": "#2255aa", "fontSize": 16, "radius": 8}),
+            json!({"label": "Press", "actionId": ""}),
+        );
+        button_el["id"] = json!("el2");
+        let design = design_with_elements(json!([
+            element(
+                "ha-toggle",
+                json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8}),
+                json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2}),
+            ),
+            button_el,
+        ]));
+        let validated = validate_design(design).unwrap();
+        let toggle = &validated["pages"][0]["elements"][0];
+        let style = toggle["style"].as_object().unwrap();
+        assert!(!style.contains_key("borderWidth"), "style gained borderWidth: {style:?}");
+        assert!(!style.contains_key("borderColor"), "style gained borderColor: {style:?}");
+        assert!(!style.contains_key("borderColorOff"), "style gained borderColorOff: {style:?}");
+        assert!(!style.contains_key("invisible"), "style gained invisible: {style:?}");
+        let props = toggle["props"].as_object().unwrap();
+        assert!(!props.contains_key("textOn") && !props.contains_key("textOff"), "props gained state text: {props:?}");
+        let button = &validated["pages"][0]["elements"][1];
+        let bprops = button["props"].as_object().unwrap();
+        assert!(!bprops.contains_key("actionKind"), "button props gained actionKind: {bprops:?}");
+        assert!(!bprops.contains_key("haEntityId"), "button props gained haEntityId: {bprops:?}");
+        assert!(!button["style"].as_object().unwrap().contains_key("invisible"));
+    }
+
+    #[test]
+    fn blocks_button_ha_action_roundtrip() {
+        let design = design_with_elements(json!([element(
+            "button",
+            json!({"color": "#2255aa", "fontSize": 16, "radius": 8}),
+            json!({"label": "Movie", "actionId": "", "actionKind": "ha",
+                   "haEntityId": "scene.movie_night", "haService": "scene"}),
+        )]));
+        let validated = validate_design(design).unwrap();
+        let props = &validated["pages"][0]["elements"][0]["props"];
+        assert_eq!(props["actionKind"], "ha");
+        assert_eq!(props["haEntityId"], "scene.movie_night");
+        assert_eq!(props["haService"], "scene");
+    }
+
+    #[test]
+    fn blocks_touch_zone_validates_with_button_action_set() {
+        let mut design = design_with_elements(json!([element(
+            "touch-zone",
+            json!({}),
+            json!({"actionId": "", "actionKind": "ha",
+                   "haEntityId": "automation.welcome", "haService": "trigger"}),
+        )]));
+        design["pages"][0]["elements"][0]["id"] = json!("zone1");
+        let validated = validate_design(design).unwrap();
+        let el = &validated["pages"][0]["elements"][0];
+        assert_eq!(el["type"], "touch-zone");
+        assert_eq!(el["props"]["actionKind"], "ha");
+        assert_eq!(el["props"]["haService"], "trigger");
+
+        // The catalog default must exist and validate too.
+        let zone = new_element("touch-zone", "zone2");
+        let design = design_with_elements(json!([zone]));
+        assert!(validate_design(design).is_ok());
+    }
+
+    #[test]
+    fn blocks_invalid_new_values_are_rejected() {
+        let bad_service = design_with_elements(json!([element(
+            "button",
+            json!({"color": "#2255aa", "fontSize": 16, "radius": 8}),
+            json!({"label": "X", "actionId": "", "actionKind": "ha",
+                   "haEntityId": "light.kitchen", "haService": "explode"}),
+        )]));
+        assert!(validate_design(bad_service).is_err(), "unknown haService must fail");
+
+        let bad_kind = design_with_elements(json!([element(
+            "touch-zone",
+            json!({}),
+            json!({"actionId": "", "actionKind": "smoke-signal"}),
+        )]));
+        assert!(validate_design(bad_kind).is_err(), "unknown actionKind must fail");
+
+        let bad_entity = design_with_elements(json!([element(
+            "button",
+            json!({"color": "#2255aa", "fontSize": 16, "radius": 8}),
+            json!({"label": "X", "actionId": "", "actionKind": "ha",
+                   "haEntityId": "not an entity", "haService": "toggle"}),
+        )]));
+        assert!(validate_design(bad_entity).is_err(), "bad haEntityId must fail");
     }
 }

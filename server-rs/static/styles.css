@@ -429,6 +429,9 @@ esp-web-install-button { display: inline-block; }
 }
 .layer-row.not-on-page { opacity: .45; }
 .element-box.shared-box { outline: 1px dashed var(--blue); outline-offset: -1px; }
+.element-box.ghost-box { border: 1px dashed #ffb45480; }
+.element-box.ghost-box:hover { border-color: #ffb454; }
+.ghost-tag { position: absolute; left: 0; top: 0; padding: 1px 3px; border-radius: 0 0 2px 0; background: #000000a0; color: #ffb454; font-size: 6px; white-space: nowrap; pointer-events: none; }
 .shared-toggle {
   width: 100%; margin-top: 8px; padding: 6px 8px; border: 1px dashed var(--line-strong);
   border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px;

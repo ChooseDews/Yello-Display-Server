@@ -11,7 +11,7 @@ pub use ota::{
 use ota::{build_firmware_response, classify_device_peek, PeekDecision};
 
 use crate::frame_diff::dirty_regions;
-use crate::home_assistant::HaClient;
+use crate::home_assistant::{ha_service_call, HaClient};
 use crate::layout_model::*;
 use crate::protocol::*;
 use crate::renderer;
@@ -1791,17 +1791,31 @@ pub async fn handle_device_ws(
     }
 }
 
-/// Side effects of pressing an interactive element: fire a `button`
-/// element's HTTP action or toggle an `ha-toggle` element's entity.
-/// Returns the target design ID for `design-link` elements so the caller
-/// applies the navigation in its own context (device session vs Studio
-/// live preview). Shared by the device touch path and /api/live-touch.
+/// Side effects of pressing an interactive element: fire a `button` /
+/// `touch-zone` element's action (a design-level HTTP action, or a
+/// direct Home Assistant service call when props.actionKind is "ha")
+/// or toggle an `ha-toggle` element's entity. Returns the target
+/// design ID for `design-link` elements so the caller applies the
+/// navigation in its own context (device session vs Studio live
+/// preview). Shared by the device touch path and /api/live-touch.
 async fn fire_element_action(state: &Arc<AppState>, layout: &Value, hit: &Value) -> Option<String> {
     let elem_type = hit.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let props = hit.get("props").unwrap_or(&Value::Null);
     match elem_type {
-        "button" => {
-            if let Some(action) = renderer::resolve_button_action(layout, hit) {
+        "button" | "touch-zone" => {
+            if props.get("actionKind").and_then(|v| v.as_str()) == Some("ha") {
+                let entity_id = props.get("haEntityId").and_then(|v| v.as_str()).unwrap_or("");
+                let preset = props.get("haService").and_then(|v| v.as_str()).unwrap_or("toggle");
+                if !entity_id.is_empty() {
+                    if let Some((domain, service)) = ha_service_call(entity_id, preset) {
+                        let client = state.ha_client.read().await.clone();
+                        let eid = entity_id.to_string();
+                        tokio::spawn(async move {
+                            let _ = client.call_service(&domain, &service, &eid).await;
+                        });
+                    }
+                }
+            } else if let Some(action) = renderer::resolve_button_action(layout, hit) {
                 let url = action.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let method = action.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
                 let body = action.get("body").and_then(|v| v.as_str()).unwrap_or("");
@@ -2286,7 +2300,7 @@ pub async fn handle_http_request(
             let types = [
                 "text", "clock", "external-text", "color-block", "button",
                 "design-link", "image", "ha-state", "ha-toggle", "script",
-                "screen", "gauge", "qr", "shape",
+                "screen", "gauge", "qr", "shape", "touch-zone",
             ];
             let mut element_defaults = serde_json::Map::new();
             for element_type in types {

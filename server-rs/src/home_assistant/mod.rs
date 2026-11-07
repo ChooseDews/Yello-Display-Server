@@ -291,21 +291,20 @@ impl HaClient {
         serde_json::from_value(val).map_err(|e| HaError::Error(e.to_string()))
     }
 
-    pub async fn toggle(&self, entity_id: &str) -> Result<(), HaError> {
+    /// Call an arbitrary Home Assistant service for one entity:
+    /// POST /api/services/<domain>/<service> with {entity_id}.
+    pub async fn call_service(&self, domain: &str, service: &str, entity_id: &str) -> Result<(), HaError> {
         if !Self::is_valid_entity_id(entity_id) {
             return Err(HaError::Error(format!("invalid entity ID: {entity_id}")));
+        }
+        if !ENTITY_RE.is_match(&format!("{domain}.{service}")) {
+            return Err(HaError::Error(format!("invalid service: {domain}.{service}")));
         }
         if !self.configured() {
             return Err(HaError::Error("Home Assistant is not configured".into()));
         }
 
-        let domain = entity_id.split('.').next().unwrap_or("homeassistant");
-        let service_domain = match domain {
-            "light" | "switch" | "fan" | "input_boolean" => domain,
-            _ => "homeassistant",
-        };
-
-        let url = format!("{}/api/services/{}/toggle", self.url, service_domain);
+        let url = format!("{}/api/services/{}/{}", self.url, domain, service);
         let body = json!({ "entity_id": entity_id });
         let body_str = serde_json::to_string(&body).unwrap_or_default();
 
@@ -326,6 +325,42 @@ impl HaClient {
 
         Ok(())
     }
+
+    pub async fn toggle(&self, entity_id: &str) -> Result<(), HaError> {
+        if !Self::is_valid_entity_id(entity_id) {
+            return Err(HaError::Error(format!("invalid entity ID: {entity_id}")));
+        }
+        let domain = entity_id.split('.').next().unwrap_or("homeassistant");
+        let service_domain = match domain {
+            "light" | "switch" | "fan" | "input_boolean" => domain,
+            _ => "homeassistant",
+        };
+        self.call_service(service_domain, "toggle", entity_id).await
+    }
+}
+
+/// Map a button / touch-zone service preset (see
+/// `layout_model::HA_ACTION_SERVICES`) plus a target entity to the
+/// concrete (domain, service) pair to call. None for an unknown preset.
+pub fn ha_service_call(entity_id: &str, preset: &str) -> Option<(String, String)> {
+    let domain = entity_id.split('.').next().unwrap_or("");
+    let pair = match preset {
+        "toggle" => {
+            let service_domain = match domain {
+                "light" | "switch" | "fan" | "input_boolean" => domain,
+                _ => "homeassistant",
+            };
+            (service_domain, "toggle")
+        }
+        "turn_on" => ("homeassistant", "turn_on"),
+        "turn_off" => ("homeassistant", "turn_off"),
+        // button.press / input_button.press live on the entity's domain.
+        "press" => (domain, "press"),
+        "trigger" => ("automation", "trigger"),
+        "scene" => ("scene", "turn_on"),
+        _ => return None,
+    };
+    Some((pair.0.to_string(), pair.1.to_string()))
 }
 
 #[cfg(test)]
@@ -339,6 +374,39 @@ mod tests {
         assert_eq!(client.auth_method(), Some("oauth"));
         assert_eq!(client.url(), "http://homeassistant.local:8123");
         assert_eq!(client.client_id(), "http://yello.local:8884");
+    }
+
+    #[test]
+    fn service_presets_map_to_domain_service_pairs() {
+        assert_eq!(
+            ha_service_call("light.kitchen", "toggle"),
+            Some(("light".to_string(), "toggle".to_string()))
+        );
+        assert_eq!(
+            ha_service_call("cover.garage", "toggle"),
+            Some(("homeassistant".to_string(), "toggle".to_string()))
+        );
+        assert_eq!(
+            ha_service_call("switch.porch", "turn_on"),
+            Some(("homeassistant".to_string(), "turn_on".to_string()))
+        );
+        assert_eq!(
+            ha_service_call("switch.porch", "turn_off"),
+            Some(("homeassistant".to_string(), "turn_off".to_string()))
+        );
+        assert_eq!(
+            ha_service_call("input_button.doorbell", "press"),
+            Some(("input_button".to_string(), "press".to_string()))
+        );
+        assert_eq!(
+            ha_service_call("automation.movie_night", "trigger"),
+            Some(("automation".to_string(), "trigger".to_string()))
+        );
+        assert_eq!(
+            ha_service_call("scene.evening", "scene"),
+            Some(("scene".to_string(), "turn_on".to_string()))
+        );
+        assert_eq!(ha_service_call("light.kitchen", "explode"), None);
     }
 
     #[test]

@@ -136,11 +136,12 @@ const SYSTEM_PROMPT = `You are the agent built into Yello Studio, a designer for
 - clock: props {format (strftime, e.g. "%H:%M" or "%a %b %d"), timezone ("" = the studio timezone, America/Los_Angeles; or an IANA zone name like "America/New_York")}.
 - external-text: props {sourceId (a dataSources id), wrap}. Shows fetched text.
 - color-block: style {color, radius}; no props. A filled rectangle.
-- button: props {label, actionId (an actions id, or "" for none)}. style {color = background, fontSize, radius}. Fires its HTTP action when tapped.
-- design-link: props {label, targetDesignId, targetPageId optional}. style like button. Navigates the screen to another design/page.
+- button: props {label, actionId (an actions id, or "" for none)}. style {color = background, fontSize, radius, invisible (true = draws nothing but still responds to taps)}. Fires its HTTP action when tapped. With props.actionKind: "ha" it instead calls a Home Assistant service on tap: props {haEntityId, haService: "toggle"|"turn_on"|"turn_off"|"press"|"trigger"|"scene"} (press = button/input_button press, trigger = automation.trigger, scene = scene.turn_on).
+- design-link: props {label, targetDesignId, targetPageId optional}. style like button (invisible allowed). Navigates the screen to another design/page.
+- touch-zone: never renders anything (the editor shows a dashed outline). props are the button's action set: {actionId} for an HTTP action, or {actionKind: "ha", haEntityId, haService} for a Home Assistant service call. Use it to make anything beneath it tappable.
 - image: props {src (URL), fit: "contain"|"cover"|"stretch"}.
 - ha-state: props {entityId (e.g. "sensor.office_temperature"), attribute ("" = state), prefix, suffix, decimals, showUnit, refreshInterval (seconds), wrap}. Shows a Home Assistant entity's state, formatted.
-- ha-toggle: props {entityId (a switch/light/etc.), label, refreshInterval}. style {color = on color, offColor, fontSize, radius}. Tapping toggles the entity in Home Assistant.
+- ha-toggle: props {entityId (a switch/light/etc.), label, refreshInterval, textOn/textOff (optional: replaces the whole displayed line in that state; empty = "label: ON/OFF")}. style {color = on color, offColor, fontSize, radius, borderColor (on-state border; off state falls back to it), borderColorOff (off-state border override), borderWidth (px; absent = the default 2px border, 0 = no border), invisible (true = draws nothing but still toggles on tap)}. Tapping toggles the entity in Home Assistant.
 - screen: props {designId, pageId}. Embeds another design's page inside the frame (one level deep, view-only).
 - gauge: a bar. props {sourceKind: "static"|"external"|"ha", value (for static), sourceId (for external), entityId (for ha), min, max, decimals, unit, showValue, refreshInterval}. style {color = bar, trackColor, fontSize}.
 - qr: props {text (URL/text to encode)}. style {color = modules, bgColor}.

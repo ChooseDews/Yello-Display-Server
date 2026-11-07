@@ -356,6 +356,128 @@ async fn test_push_frame_raw_for_device_without_deflate_capability() {
 }
 
 #[tokio::test]
+async fn test_button_and_touch_zone_ha_actions_call_mock_ha() {
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Mock Home Assistant: records raw requests, answers 200 with [].
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ha_addr = listener.local_addr().unwrap();
+    let captured = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let captured_task = captured.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else { break };
+            let cap = captured_task.clone();
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut header_end: Option<usize> = None;
+                let mut content_length = 0usize;
+                loop {
+                    if let Some(end) = header_end {
+                        if buf.len() >= end + content_length {
+                            break;
+                        }
+                    }
+                    match socket.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if header_end.is_none() {
+                                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    header_end = Some(pos + 4);
+                                    let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                                    for line in head.lines() {
+                                        if let Some(v) = line.strip_prefix("content-length:") {
+                                            content_length = v.trim().parse().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                if !buf.is_empty() {
+                    cap.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+                }
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n[]")
+                    .await;
+            });
+        }
+    });
+
+    let state = Arc::new(AppState::new(
+        PathBuf::from("/tmp/test_studio_blocks.json"),
+        PathBuf::from("/tmp/test_secrets_blocks.json"),
+        static_dir(),
+    ));
+    {
+        let mut client = state.ha_client.write().await;
+        *client = yello_server::HaClient::new(&format!("http://{ha_addr}"), "test-token");
+    }
+
+    let touch = |state: Arc<AppState>, layout: serde_json::Value| async move {
+        let body = json!({ "layout": layout, "x": 120, "y": 160, "touchType": "down" });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/live-touch?design=default")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = handle_http_request(req, state).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    };
+
+    // A button whose actionKind is "ha" fires the mapped service:
+    // scene preset -> scene.turn_on.
+    let mut layout = default_design();
+    layout["pages"][0]["elements"] = json!([{
+        "id": "btn1", "type": "button", "name": "Movie", "visible": true, "locked": false,
+        "frame": { "x": 0, "y": 0, "w": 240, "h": 320 },
+        "style": { "color": "#2255aa", "fontSize": 16, "radius": 8 },
+        "props": { "label": "Movie", "actionId": "", "actionKind": "ha",
+                   "haEntityId": "scene.movie_night", "haService": "scene" }
+    }]);
+    touch(state.clone(), layout).await;
+
+    // A touch-zone with turn_on -> homeassistant.turn_on.
+    let mut layout = default_design();
+    layout["pages"][0]["elements"] = json!([{
+        "id": "zone1", "type": "touch-zone", "name": "Zone", "visible": true, "locked": false,
+        "frame": { "x": 0, "y": 0, "w": 240, "h": 320 },
+        "style": {},
+        "props": { "actionId": "", "actionKind": "ha",
+                   "haEntityId": "light.kitchen", "haService": "turn_on" }
+    }]);
+    touch(state.clone(), layout).await;
+
+    // The service calls are spawned; wait for both to land.
+    let mut requests = Vec::new();
+    for _ in 0..50 {
+        {
+            let cap = captured.lock().unwrap();
+            requests = cap.clone();
+        }
+        if requests.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(requests.len(), 2, "expected two HA service calls, got: {requests:?}");
+    assert!(
+        requests.iter().any(|r| r.starts_with("POST /api/services/scene/turn_on") && r.contains("scene.movie_night")),
+        "scene call missing: {requests:?}"
+    );
+    assert!(
+        requests.iter().any(|r| r.starts_with("POST /api/services/homeassistant/turn_on") && r.contains("light.kitchen")),
+        "turn_on call missing: {requests:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_write_atomic_replaces_content() {
     let dir = std::env::temp_dir().join(format!("yello-atomic-{}", std::process::id()));
     let path = dir.join("studio.json");

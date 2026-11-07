@@ -27,6 +27,7 @@ export const TYPE_META = {
   "color-block": { label: "Color block", icon: "square-fill" },
   "ha-state": { label: "HA sensor", icon: "activity" },
   "ha-toggle": { label: "HA toggle", icon: "power" },
+  "touch-zone": { label: "Touch zone", icon: "pointer" },
   script: { label: "Script", icon: "code" },
   screen: { label: "Screen embed", icon: "screen-embed" },
   gauge: { label: "Gauge", icon: "gauge" },

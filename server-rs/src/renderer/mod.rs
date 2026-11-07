@@ -707,6 +707,12 @@ pub fn render(
                     draw_rounded_rect(&mut img, fx, fy, fw, fh, col, rad, None);
                 }
                 "button" | "design-link" => {
+                    // Invisible: draw nothing; hit_test_buttons still
+                    // sees the frame, so the tap lands on this element
+                    // over whatever is rendered beneath it.
+                    if style.get("invisible").and_then(|v| v.as_bool()) == Some(true) {
+                        continue;
+                    }
                     let mut col = parse_color(style.get("color").unwrap_or(&Value::Null), (34, 85, 170));
                     if pressed_set.contains(&elem_id.to_string()) {
                         col = (col.0.saturating_add(70), col.1.saturating_add(70), col.2.saturating_add(70));
@@ -725,6 +731,9 @@ pub fn render(
                     draw_text_box(&mut img, fx, fy, fw, fh, label, &btn_style, false);
                 }
                 "ha-toggle" => {
+                    if style.get("invisible").and_then(|v| v.as_bool()) == Some(true) {
+                        continue;
+                    }
                     let entity_id = props.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
                     let entity = ctx.get("homeAssistant").and_then(|h| h.get(entity_id));
                     let is_on = entity.and_then(|e| e.get("state")).and_then(|s| s.as_str()) == Some("on");
@@ -735,17 +744,48 @@ pub fn render(
                         col = (col.0.saturating_add(50), col.1.saturating_add(50), col.2.saturating_add(50));
                     }
                     let rad = style.get("radius").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
-                    draw_rounded_rect(&mut img, fx, fy, fw, fh, col, rad, Some(((255, 255, 255), 2)));
-
-                    let state_label = if entity.and_then(|e| e.get("error")).and_then(|v| v.as_bool()) == Some(true) {
-                        "ERR"
-                    } else if is_on {
-                        "ON"
+                    // Border: absent keys keep the historical look (2px
+                    // white). An explicit borderWidth of 0 removes the
+                    // border; borderColorOff overrides the off state and
+                    // falls back to borderColor (then white).
+                    let border_width = style.get("borderWidth").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+                    let outline = if border_width == 0 {
+                        None
                     } else {
-                        "OFF"
+                        let border_key = if is_on {
+                            "borderColor"
+                        } else {
+                            "borderColorOff"
+                        };
+                        let border_col = style
+                            .get(border_key)
+                            .filter(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false))
+                            .or_else(|| style.get("borderColor"))
+                            .unwrap_or(&Value::Null);
+                        Some((parse_color(border_col, (255, 255, 255)), border_width))
                     };
+                    draw_rounded_rect(&mut img, fx, fy, fw, fh, col, rad, outline);
+
+                    let has_error = entity.and_then(|e| e.get("error")).and_then(|v| v.as_bool()) == Some(true);
                     let label = props.get("label").and_then(|v| v.as_str()).unwrap_or("Light");
-                    let text = format!("{label}: {state_label}");
+                    // Per-state text replaces the whole line when set;
+                    // empty falls back to the historical "Label: ON/OFF".
+                    let state_text = if is_on {
+                        props.get("textOn")
+                    } else {
+                        props.get("textOff")
+                    }
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                    let text = if has_error {
+                        format!("{label}: ERR")
+                    } else if let Some(state_text) = state_text {
+                        state_text.to_string()
+                    } else if is_on {
+                        format!("{label}: ON")
+                    } else {
+                        format!("{label}: OFF")
+                    };
                     let text_color = if brightness(col) > 140.0 { "#000000" } else { "#ffffff" };
                     let btn_style = serde_json::json!({
                         "fontSize": style.get("fontSize").and_then(|v| v.as_u64()).unwrap_or(16),
@@ -977,6 +1017,9 @@ pub fn render(
                         }
                     }
                 }
+                // A touch-zone is a pure touch target: it never draws,
+                // on any surface (the editor shows a dashed outline).
+                "touch-zone" => {}
                 _ => {}
             }
         }
@@ -1017,7 +1060,7 @@ pub fn hit_test_buttons<'a>(layout: &'a Value, x: i32, y: i32) -> Option<&'a Val
     if let Some(elements) = layout.get("elements").and_then(|v| v.as_array()) {
         for elem in elements.iter().rev() {
             let elem_type = elem.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if !["button", "design-link", "ha-toggle"].contains(&elem_type) {
+            if !["button", "design-link", "ha-toggle", "touch-zone"].contains(&elem_type) {
                 continue;
             }
             if elem.get("visible").and_then(|v| v.as_bool()) == Some(false) {
@@ -1140,6 +1183,133 @@ mod tests {
         draw_bitmap_text(&mut img, 0, 0, "g.", Rgba([255, 255, 255, 255]), 1);
         assert!(img.get_pixel(2, 7)[0] > 0 || img.get_pixel(3, 7)[0] > 0 || img.get_pixel(4, 7)[0] > 0,
             "descender ink must reach row 7");
+    }
+
+    // ---- Blocks round: invisible elements, toggle borders, state text ----
+
+    fn blocks_layout(elements: Value) -> Value {
+        serde_json::json!({
+            "name": "t", "profile": "ili9341-240x320", "orientation": "portrait",
+            "background": "#0a0a1e", "dataSources": [], "actions": [],
+            "elements": elements
+        })
+    }
+
+    fn blocks_ctx(state: &str) -> Value {
+        serde_json::json!({"homeAssistant": {"light.kitchen": {"state": state}}})
+    }
+
+    fn toggle_elem(style: Value, props: Value) -> Value {
+        serde_json::json!({
+            "id": "t1", "type": "ha-toggle", "name": "T", "visible": true, "locked": false,
+            "frame": {"x": 10, "y": 10, "w": 120, "h": 44},
+            "style": style, "props": props
+        })
+    }
+
+    fn frame_ink(img: &RgbImage, x: u32, y: u32, w: u32, h: u32) -> usize {
+        let bg = Rgb([10, 10, 30]);
+        let mut count = 0;
+        for py in y..y + h {
+            for px in x..x + w {
+                if *img.get_pixel(px, py) != bg {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn render_one(elem: Value, ctx: &Value) -> RgbImage {
+        let layout = blocks_layout(serde_json::json!([elem]));
+        render(&layout, ctx, &HashMap::new())
+    }
+
+    #[test]
+    fn invisible_toggle_and_button_draw_nothing_but_still_hit() {
+        let images = HashMap::new();
+        let style = serde_json::json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8, "invisible": true});
+        let props = serde_json::json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2});
+        let img = render_one(toggle_elem(style, props), &blocks_ctx("on"));
+        assert_eq!(frame_ink(&img, 10, 10, 120, 44), 0, "invisible ha-toggle must draw zero ink");
+
+        let visible_style = serde_json::json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8});
+        let props = serde_json::json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2});
+        let img = render_one(toggle_elem(visible_style, props), &blocks_ctx("on"));
+        assert!(frame_ink(&img, 10, 10, 120, 44) > 0, "visible ha-toggle draws");
+
+        let button = serde_json::json!({
+            "id": "b1", "type": "button", "name": "B", "visible": true, "locked": false,
+            "frame": {"x": 10, "y": 10, "w": 120, "h": 44},
+            "style": {"color": "#2255aa", "fontSize": 16, "radius": 8, "invisible": true},
+            "props": {"label": "Press", "actionId": ""}
+        });
+        let layout = blocks_layout(serde_json::json!([button]));
+        let img = render(&layout, &blocks_ctx("on"), &images);
+        assert_eq!(frame_ink(&img, 10, 10, 120, 44), 0, "invisible button must draw zero ink");
+        let hit = hit_test_buttons(&layout, 20, 20).expect("invisible button still hit-tests");
+        assert_eq!(hit["id"], "b1");
+
+        let zone = serde_json::json!({
+            "id": "z1", "type": "touch-zone", "name": "Z", "visible": true, "locked": false,
+            "frame": {"x": 10, "y": 10, "w": 120, "h": 44},
+            "style": {}, "props": {"actionId": ""}
+        });
+        let layout = blocks_layout(serde_json::json!([zone]));
+        let img = render(&layout, &blocks_ctx("on"), &images);
+        assert_eq!(frame_ink(&img, 10, 10, 120, 44), 0, "touch-zone never draws");
+        let hit = hit_test_buttons(&layout, 20, 20).expect("touch-zone hit-tests");
+        assert_eq!(hit["id"], "z1");
+    }
+
+    #[test]
+    fn toggle_border_colors_and_width() {
+        let base_props = serde_json::json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2});
+        // Left-edge midpoint pixel (radius only affects corners).
+        let edge = |img: &RgbImage| *img.get_pixel(11, 32);
+
+        // Legacy (no border keys): historical 2px white border.
+        let style = serde_json::json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8});
+        let img = render_one(toggle_elem(style, base_props.clone()), &blocks_ctx("on"));
+        assert_eq!(edge(&img), Rgb([255, 255, 255]), "legacy border is white");
+
+        // Explicit width + color: red 6px border on the on state.
+        let style = serde_json::json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8, "borderWidth": 6, "borderColor": "#ff0000"});
+        let img = render_one(toggle_elem(style.clone(), base_props.clone()), &blocks_ctx("on"));
+        assert_eq!(edge(&img), Rgb([255, 0, 0]), "on state uses borderColor");
+        // Off state without an override falls back to borderColor too.
+        let img = render_one(toggle_elem(style, base_props.clone()), &blocks_ctx("off"));
+        assert_eq!(edge(&img), Rgb([255, 0, 0]), "off state falls back to borderColor");
+
+        // Off-state override wins when present.
+        let style = serde_json::json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8, "borderWidth": 6, "borderColor": "#ff0000", "borderColorOff": "#00ff00"});
+        let img = render_one(toggle_elem(style, base_props.clone()), &blocks_ctx("off"));
+        assert_eq!(edge(&img), Rgb([0, 255, 0]), "off state uses borderColorOff");
+
+        // Width 0: no border — the edge pixel is the fill color.
+        let style = serde_json::json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8, "borderWidth": 0, "borderColor": "#ff0000"});
+        let img = render_one(toggle_elem(style, base_props), &blocks_ctx("on"));
+        assert_eq!(edge(&img), Rgb([242, 201, 76]), "borderWidth 0 removes the border");
+    }
+
+    #[test]
+    fn toggle_state_text_selected_by_state() {
+        let with_text = serde_json::json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2, "textOn": "Open", "textOff": "Closed"});
+        let plain = serde_json::json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2});
+        let style = || serde_json::json!({"color": "#f2c94c", "offColor": "#353b48", "fontSize": 16, "radius": 8});
+
+        let on_text = render_one(toggle_elem(style(), with_text.clone()), &blocks_ctx("on"));
+        let on_plain = render_one(toggle_elem(style(), plain.clone()), &blocks_ctx("on"));
+        assert_ne!(on_text.as_raw(), on_plain.as_raw(), "textOn changes the on render");
+
+        let off_text = render_one(toggle_elem(style(), with_text.clone()), &blocks_ctx("off"));
+        let off_plain = render_one(toggle_elem(style(), plain), &blocks_ctx("off"));
+        assert_ne!(off_text.as_raw(), off_plain.as_raw(), "textOff changes the off render");
+
+        // Different state text renders differently in the same state.
+        let other = serde_json::json!({"entityId": "light.kitchen", "label": "Kitchen", "refreshInterval": 2, "textOn": "Ajar", "textOff": "Closed"});
+        let on_other = render_one(toggle_elem(style(), other), &blocks_ctx("on"));
+        assert_ne!(on_text.as_raw(), on_other.as_raw(), "the textOn content drives the render");
     }
 
     #[test]

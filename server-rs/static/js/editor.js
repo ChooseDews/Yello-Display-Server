@@ -661,7 +661,18 @@ export function renderElementOverlay(designId, pageId, overlay) {
     const isSelected = element.id === S.selectedId && designId === S.editingDesignId && pageId === activePageIdFor(designId);
     const isLink = element.type === "design-link";
     const shared = isSharedElement(doc, element);
-    box.className = `element-box${isSelected ? " selected" : ""}${element.locked ? " locked" : ""}${S.flowMode && isLink ? " link-box" : ""}${shared ? " shared-box" : ""}`;
+    // Ghost elements draw nothing on the device (touch-zones always,
+    // style.invisible elements by choice): mark them with a dashed
+    // outline + tag so they stay findable and selectable here.
+    const isGhost = element.type === "touch-zone" || Boolean(element.style?.invisible);
+    box.className = `element-box${isSelected ? " selected" : ""}${element.locked ? " locked" : ""}${S.flowMode && isLink ? " link-box" : ""}${shared ? " shared-box" : ""}${isGhost ? " ghost-box" : ""}`;
+    if (isGhost) {
+      box.title = element.type === "touch-zone" ? "Touch zone (invisible on the device)" : "Invisible on the device — still touchable";
+      const tag = document.createElement("span");
+      tag.className = "ghost-tag";
+      tag.textContent = element.type === "touch-zone" ? "touch zone" : "hidden";
+      box.append(tag);
+    }
     box.dataset.elementId = element.id;
     if (shared) box.title = "Shared block (edit once, appears on its chosen pages)";
     Object.assign(box.style, {
@@ -830,6 +841,46 @@ function appendHomeAssistantEntityField(container, value, setter) {
   return input;
 }
 
+const HA_SERVICE_OPTIONS = [
+  ["toggle", "Toggle"],
+  ["turn_on", "Turn on"],
+  ["turn_off", "Turn off"],
+  ["press", "Press (button / input_button)"],
+  ["trigger", "Trigger (automation)"],
+  ["scene", "Activate scene"],
+];
+
+// The action set shared by button and touch-zone: a design-level HTTP
+// action (props.actionId, edited in the section below the inspector),
+// or a direct Home Assistant service call.
+function appendActionKindFields(container, element) {
+  appendField(container, "Action", element.props.actionKind || "", {
+    type: "select",
+    options: [["", "HTTP action"], ["ha", "Home Assistant service"]],
+  }, (value) => {
+    if (value === "ha") {
+      element.props.actionKind = "ha";
+      if (!element.props.haService) element.props.haService = "toggle";
+      if (element.props.haEntityId === undefined) element.props.haEntityId = "";
+    } else {
+      delete element.props.actionKind;
+    }
+    renderInspector();
+  });
+  if (element.props.actionKind === "ha") {
+    appendHomeAssistantEntityField(container, element.props.haEntityId || "", (value) => { element.props.haEntityId = value; });
+    appendField(container, "Service", element.props.haService || "toggle", { type: "select", options: HA_SERVICE_OPTIONS }, (value) => { element.props.haService = value; });
+  }
+}
+
+// style.invisible: renderer draws nothing, the frame still hit-tests.
+function appendInvisibleField(container, element) {
+  appendField(container, "Invisible", Boolean(element.style.invisible), { type: "checkbox" }, (value) => {
+    if (value) element.style.invisible = true;
+    else delete element.style.invisible;
+  });
+}
+
 export function renderInspector() {
   const container = $("inspector");
   const element = selected();
@@ -907,8 +958,16 @@ export function renderInspector() {
     appendField(container, "Wrap", element.props.wrap, { type: "checkbox" }, (value) => { element.props.wrap = value; });
   } else if (element.type === "button") {
     appendField(container, "Label", element.props.label, { type: "text" }, (value) => { element.props.label = value; });
+    appendActionKindFields(container, element);
     fontFields();
     appendField(container, "Radius", element.style.radius, { type: "number", min: 0, max: 50 }, (value) => { element.style.radius = value; });
+    appendInvisibleField(container, element);
+  } else if (element.type === "touch-zone") {
+    appendActionKindFields(container, element);
+    const help = document.createElement("p");
+    help.className = "integration-help";
+    help.textContent = "Never drawn on the device — the frame is a pure touch target. Put it over whatever should react to the tap (an image, a sensor readout, anything).";
+    container.append(help);
   } else if (element.type === "design-link") {
     appendField(container, "Label", element.props.label, { type: "text" }, (value) => { element.props.label = value; });
     appendField(
@@ -918,6 +977,7 @@ export function renderInspector() {
     );
     fontFields();
     appendField(container, "Radius", element.style.radius, { type: "number", min: 0, max: 50 }, (value) => { element.style.radius = value; });
+    appendInvisibleField(container, element);
     const help = document.createElement("p");
     help.className = "integration-help";
     help.textContent = "Navigates only the device that pressed it — its assigned home design is unchanged. “Back” walks the device's own history; “Home” returns to its home page.";
@@ -942,11 +1002,23 @@ export function renderInspector() {
   } else if (element.type === "ha-toggle") {
     appendHomeAssistantEntityField(container, element.props.entityId, (value) => { element.props.entityId = value; });
     appendField(container, "Label", element.props.label, { type: "text" }, (value) => { element.props.label = value; });
+    appendField(container, "Text when on", element.props.textOn || "", { type: "text" }, (value) => {
+      if (value) element.props.textOn = value;
+      else delete element.props.textOn;
+    });
+    appendField(container, "Text when off", element.props.textOff || "", { type: "text" }, (value) => {
+      if (value) element.props.textOff = value;
+      else delete element.props.textOff;
+    });
     appendField(container, "Font size", element.style.fontSize, { type: "number", min: 6, max: 120 }, (value) => { element.style.fontSize = value; });
     appendField(container, "On color", element.style.color, { type: "color" }, (value) => { element.style.color = value; });
     appendField(container, "Off color", element.style.offColor, { type: "color" }, (value) => { element.style.offColor = value; });
+    appendField(container, "Border width", element.style.borderWidth ?? 2, { type: "number", min: 0, max: 20 }, (value) => { element.style.borderWidth = value; });
+    appendField(container, "Border color", element.style.borderColor || "#ffffff", { type: "color" }, (value) => { element.style.borderColor = value; });
+    appendField(container, "Border color (off)", element.style.borderColorOff || element.style.borderColor || "#ffffff", { type: "color" }, (value) => { element.style.borderColorOff = value; });
     appendField(container, "Radius", element.style.radius, { type: "number", min: 0, max: 50 }, (value) => { element.style.radius = value; });
     appendField(container, "Refresh (s)", element.props.refreshInterval, { type: "number", min: 1, max: 3600 }, (value) => { element.props.refreshInterval = value; });
+    appendInvisibleField(container, element);
   } else if (element.type === "script") {
     const examples = [["", "Choose an example…"], ...(S.catalog.scriptExamples || []).map((item) => [item.id, item.name])];
     appendField(container, "Example", "", { type: "select", options: examples }, (value) => {
@@ -1017,7 +1089,9 @@ export function renderInspector() {
     appendField(container, "Outline color", element.style.outlineColor || "#ffffff", { type: "color" }, (value) => { element.style.outlineColor = value; });
   }
 
-  if ((["ha-state", "ha-toggle", "script"].includes(element.type) || (element.type === "gauge" && element.props.sourceKind === "ha")) && !S.homeAssistant.configured) {
+  if ((["ha-state", "ha-toggle", "script"].includes(element.type)
+    || (element.type === "gauge" && element.props.sourceKind === "ha")
+    || (["button", "touch-zone"].includes(element.type) && element.props.actionKind === "ha")) && !S.homeAssistant.configured) {
     const help = document.createElement("p");
     help.className = "integration-help";
     help.textContent = "Home Assistant is not configured. Add its URL and token on the Settings page to use ha().";
@@ -1073,7 +1147,8 @@ export function renderResourceEditor(element) {
   const section = $("resource-section");
   const editor = $("resource-editor");
   editor.replaceChildren();
-  if (!element || !["external-text", "button"].includes(element.type)) {
+  const showHttpAction = element && ["button", "touch-zone"].includes(element.type) && element.props.actionKind !== "ha";
+  if (!element || !(element.type === "external-text" || showHttpAction)) {
     section.classList.add("hidden");
     return;
   }
@@ -1092,7 +1167,7 @@ export function renderResourceEditor(element) {
     help.textContent = "Private network URLs are blocked unless the server explicitly allowlists their host.";
     fields.append(help);
   } else {
-    $("resource-title").textContent = "Button action";
+    $("resource-title").textContent = element.type === "touch-zone" ? "Zone action" : "Button action";
     const action = S.layout.actions.find((item) => item.id === element.props.actionId);
     if (!action) {
       const create = document.createElement("button");

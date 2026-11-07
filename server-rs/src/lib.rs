@@ -19,6 +19,7 @@ pub use layout_model::{
     new_element, default_design,
     DESIGN_SCHEMA_VERSION, DEFAULT_PAGE_ID, NavTarget, parse_nav_target,
     validate_design, design_home_page_id, effective_page_layout,
+    HA_ACTION_SERVICES,
 };
 
 pub use protocol::{
@@ -56,7 +57,7 @@ pub use renderer::{
     parse_color, brightness, draw_bitmap_text,
 };
 
-pub use home_assistant::{HaClient, HaState, HaError, HomeAssistantError};
+pub use home_assistant::{ha_service_call, HaClient, HaState, HaError, HomeAssistantError};
 
 pub use safe_http::{SafeHttp, SafeHttpError, UnsafeUrlError, parse_remote_url};
 
