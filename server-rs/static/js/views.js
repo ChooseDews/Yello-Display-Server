@@ -54,14 +54,17 @@ export async function renderAboutPage() {
   } catch { /* the static blurb stays */ }
 }
 
-// The ESP32 web flasher lives on the Devices page. The server does NOT
-// bundle firmware (it used to, via a CI download of the firmware-latest
-// release — a race between the firmware and Docker workflows shipped a
-// stale bin once, and the bundling existed only to feed this button).
-// Instead the user provides the .bin: the card links the GitHub release
-// to download it from, the user picks the file(s) here, and the page
-// builds an ESP Web Tools manifest in memory (blob URLs) from what was
-// picked. Two shapes are accepted:
+// The ESP32 web flasher lives on the Devices page. Primary path: the
+// server bundles the latest firmware — CI pulls the repo's rolling
+// firmware-latest GitHub release into the image (docker.yml waits for
+// that release to be fresh for HEAD before downloading, after a Nov 4,
+// 2026 race shipped a stale bin), and the internal flasher flashes that
+// bundled manifest (/static/firmware/manifest.json) directly, no
+// download or file picking needed.
+// Fallback path: the user can still provide their own .bin — the card
+// links the GitHub release to download it from, the user picks the
+// file(s) here, and the page builds an ESP Web Tools manifest in memory
+// (blob URLs) from what was picked. Two shapes are accepted:
 //   - yello_device.bin alone: an app-only update at 0x10000, for a board
 //     already running Yello (bootloader + partitions are unchanged).
 //   - the full release set incl. flasher_args.json (bootloader.bin,
@@ -111,17 +114,107 @@ async function flashParseSelection(fileList) {
   throw new Error("Pick either yello_device.bin on its own (app-only update), or the full release set including flasher_args.json.");
 }
 
+let flashScriptLoading = null;
+function flashLoadScript() {
+  if (!flashScriptLoading) {
+    flashScriptLoading = new Promise((resolve, reject) => {
+      if (customElements.get("esp-web-install-button")) { resolve(); return; }
+      const script = document.createElement("script");
+      script.type = "module";
+      script.src = "/static/vendor/esp-web-tools/dist/web/install-button.js";
+      script.addEventListener("error", reject);
+      document.head.append(script);
+      customElements.whenDefined("esp-web-install-button").then(resolve, reject);
+    });
+  }
+  return flashScriptLoading;
+}
+
+// Swap the card body for the ESP Web Tools install button (pointed at
+// manifestUrl) and open its dialog. Used by both the bundled-firmware
+// button and the user-provided-files button.
+function flashLaunchInstall(region, badge, noteEl, button, manifestUrl) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "Loading the flasher\u2026";
+  const fail = (message) => {
+    badge.textContent = "Flasher unavailable";
+    if (noteEl) noteEl.textContent = message;
+    button.disabled = false;
+    button.textContent = original;
+  };
+  flashLoadScript().then(() => {
+    const install = document.createElement("esp-web-install-button");
+    install.setAttribute("manifest", manifestUrl);
+    const activate = document.createElement("button");
+    activate.slot = "activate";
+    activate.className = "primary-button";
+    activate.type = "button";
+    activate.textContent = "Connect & install firmware";
+    const unsupported = document.createElement("span");
+    unsupported.slot = "unsupported";
+    unsupported.className = "form-help";
+    unsupported.textContent = "This browser cannot flash over USB: Web Serial needs Chrome or Edge on a computer.";
+    const notAllowed = document.createElement("span");
+    notAllowed.slot = "not-allowed";
+    notAllowed.className = "form-help";
+    notAllowed.textContent = "Browser flashing needs a secure context (HTTPS or localhost).";
+    install.append(activate, unsupported, notAllowed);
+    region.replaceChildren(install);
+    activate.click();
+  }).catch(() => fail("The flasher failed to start. The same files flash fine with esptool."));
+}
+
 async function initFlasher() {
   if (flashReady) return;
   flashReady = true;
   const region = $("flash-region");
   const badge = $("flash-state");
-  badge.textContent = "You provide the .bin";
+  badge.textContent = "Checking firmware\u2026";
   region.replaceChildren();
+
+  // Bundled firmware first: probe the manifest the image carries.
+  let bundledManifest = null;
+  try {
+    const response = await fetch("/static/firmware/manifest.json", { cache: "no-store" });
+    if (response.ok) bundledManifest = await response.json();
+  } catch { /* treated as not bundled */ }
+  const bundledParts = bundledManifest?.builds?.[0]?.parts;
+  const hasBundled = Array.isArray(bundledParts) && bundledParts.length > 0;
+
+  const bundledEls = [];
+  if (!hasBundled) badge.textContent = "You provide the .bin";
+  if (hasBundled) {
+    badge.textContent = "Firmware ready";
+    const intro = document.createElement("p");
+    intro.className = "form-help";
+    intro.textContent = "This server carries the latest firmware from the firmware-latest GitHub release \u2014 no download needed:";
+    const partsLine = document.createElement("p");
+    partsLine.className = "form-help";
+    partsLine.textContent = bundledParts
+      .map((p) => `${p.path} \u2192 0x${Number(p.offset).toString(16)}`)
+      .join(" \u00b7 ");
+    const bundledNote = document.createElement("p");
+    bundledNote.className = "form-help";
+    const bundledGo = document.createElement("button");
+    bundledGo.type = "button";
+    bundledGo.className = "primary-button";
+    bundledGo.textContent = "Connect & install firmware";
+    bundledGo.addEventListener("click", () => {
+      flashLaunchInstall(region, badge, bundledNote, bundledGo, "/static/firmware/manifest.json");
+    });
+    bundledEls.push(intro, partsLine, bundledGo, bundledNote);
+    const divider = document.createElement("p");
+    divider.className = "form-help";
+    divider.textContent = "Or provide your own .bin instead:";
+    bundledEls.push(divider);
+  }
 
   const intro = document.createElement("p");
   intro.className = "form-help";
-  intro.textContent = "The server doesn't carry firmware. Download the .bin from GitHub, then provide it here:";
+  intro.textContent = hasBundled
+    ? "Pick file(s) you downloaded from GitHub:"
+    : "The server doesn't carry firmware. Download the .bin from GitHub, then provide it here:";
   const download = document.createElement("div");
   download.className = "settings-actions";
   const dlApp = document.createElement("a");
@@ -154,7 +247,7 @@ async function initFlasher() {
   picker.addEventListener("change", async () => {
     flashParts = [];
     go.disabled = true;
-    badge.textContent = "You provide the .bin";
+    badge.textContent = hasBundled ? "Firmware ready" : "You provide the .bin";
     if (!picker.files.length) return;
     try {
       const { parts, full } = await flashParseSelection(picker.files);
@@ -175,55 +268,23 @@ async function initFlasher() {
   // button explains that itself via its slots.
   go.addEventListener("click", () => {
     if (!flashParts.length) return;
-    go.disabled = true;
-    go.textContent = "Loading the flasher\u2026";
-    const fail = (message) => {
-      badge.textContent = "Flasher unavailable";
-      summary.textContent = message;
-      go.disabled = false;
-      go.textContent = "Connect & install firmware";
+    flashClearBlobs();
+    const parts = flashParts.map((p) => {
+      const url = URL.createObjectURL(p.file);
+      flashBlobUrls.push(url);
+      return { path: url, offset: p.offset };
+    });
+    const manifest = {
+      name: "Yello Device",
+      version: "user-provided",
+      builds: [{ chipFamily: "ESP32", parts }],
     };
-    const script = document.createElement("script");
-    script.type = "module";
-    script.src = "/static/vendor/esp-web-tools/dist/web/install-button.js";
-    script.addEventListener("error", () => fail("The ESP Web Tools script could not be loaded from this server. The same files flash fine with esptool."));
-    document.head.append(script);
-    customElements.whenDefined("esp-web-install-button").then(() => {
-      flashClearBlobs();
-      const parts = flashParts.map((p) => {
-        const url = URL.createObjectURL(p.file);
-        flashBlobUrls.push(url);
-        return { path: url, offset: p.offset };
-      });
-      const manifest = {
-        name: "Yello Device",
-        version: "user-provided",
-        builds: [{ chipFamily: "ESP32", parts }],
-      };
-      const manifestUrl = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/json" }));
-      flashBlobUrls.push(manifestUrl);
-      const install = document.createElement("esp-web-install-button");
-      install.setAttribute("manifest", manifestUrl);
-      const activate = document.createElement("button");
-      activate.slot = "activate";
-      activate.className = "primary-button";
-      activate.type = "button";
-      activate.textContent = "Connect & install firmware";
-      const unsupported = document.createElement("span");
-      unsupported.slot = "unsupported";
-      unsupported.className = "form-help";
-      unsupported.textContent = "This browser cannot flash over USB: Web Serial needs Chrome or Edge on a computer.";
-      const notAllowed = document.createElement("span");
-      notAllowed.slot = "not-allowed";
-      notAllowed.className = "form-help";
-      notAllowed.textContent = "Browser flashing needs a secure context (HTTPS or localhost).";
-      install.append(activate, unsupported, notAllowed);
-      region.replaceChildren(install);
-      activate.click();
-    }).catch(() => fail("The flasher failed to start. The same files flash fine with esptool."));
+    const manifestUrl = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/json" }));
+    flashBlobUrls.push(manifestUrl);
+    flashLaunchInstall(region, badge, summary, go, manifestUrl);
   });
 
-  region.append(intro, download, picker, summary, go);
+  region.append(...bundledEls, intro, download, picker, summary, go);
 }
 
 // ---------- Server page ----------

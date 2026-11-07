@@ -39,10 +39,61 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # No firmware is bundled into the image: the Devices-page web
-      # flasher flashes a .bin the user provides (downloaded from the
-      # firmware-latest GitHub release), so the image never carries a
-      # stale or racing firmware copy.
+      # The About page's web flasher serves these from /static/firmware/.
+      # The manifest offsets come from the firmware build's flasher_args.json,
+      # so they stay correct if the partition layout ever moves.
+      - name: Bundle the latest firmware for the web flasher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # firmware-latest is republished by the "Build and package"
+          # workflow on the same push this run belongs to, and the two
+          # workflows race: without a wait this step can download the
+          # PREVIOUS build's firmware (Nov 4, 2026: the f8b49bd image
+          # bundled the v1 firmware because the release refreshed ~3 min
+          # after this step ran). On push events, wait until the release
+          # is at least as fresh as HEAD before downloading. The wait is
+          # soft — on timeout we warn and bundle whatever exists rather
+          # than fail the image build (PR and dispatch runs never refresh
+          # the release, so they skip the wait entirely).
+          if [ "${{ github.event_name }}" = "push" ]; then
+            head_epoch=$(git log -1 --format=%ct)
+            for attempt in $(seq 1 40); do
+              rel=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/firmware-latest" --jq .updated_at 2>/dev/null || echo "")
+              if [ -n "$rel" ] && [ "$(date -u -d "$rel" +%s)" -ge "$head_epoch" ]; then
+                echo "firmware-latest ($rel) is fresh for HEAD."
+                break
+              fi
+              if [ "$attempt" = "40" ]; then
+                echo "::warning::firmware-latest still older than HEAD after ~20 min; bundling it anyway."
+              else
+                echo "firmware-latest ($rel) predates HEAD; waiting for the firmware build to republish it…"
+                sleep 30
+              fi
+            done
+          fi
+          mkdir -p server-rs/static/firmware
+          if gh release download firmware-latest --repo "$GITHUB_REPOSITORY" \
+              --pattern "*.bin" --pattern "flasher_args.json" \
+              --dir server-rs/static/firmware 2>/dev/null; then
+            python3 - <<'PYEOF'
+          import json, os
+          directory = "server-rs/static/firmware"
+          with open(os.path.join(directory, "flasher_args.json")) as handle:
+              flash_args = json.load(handle)
+          parts = [
+              {"path": os.path.basename(path), "offset": int(offset, 16)}
+              for offset, path in sorted(flash_args["flash_files"].items(), key=lambda item: int(item[0], 16))
+          ]
+          manifest = {"name": "Yello Device", "version": "latest",
+                      "builds": [{"chipFamily": "ESP32", "parts": parts}]}
+          with open(os.path.join(directory, "manifest.json"), "w") as handle:
+              json.dump(manifest, handle, indent=2)
+          print("Bundled firmware parts:", [part["path"] for part in parts])
+          PYEOF
+          else
+            echo "No firmware-latest release yet; the About page will report the firmware as not bundled."
+          fi
       - name: Build and optionally publish platform image
         id: build
         uses: docker/build-push-action@v6
